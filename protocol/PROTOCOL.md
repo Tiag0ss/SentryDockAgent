@@ -24,7 +24,9 @@ Outbound connection from agent with token:
 | `docker.pull` | `{ image: string, auth?: { username, password, serveraddress } }` |
 | `docker.recreate` | `{ id: string, image?: string, desiredDigest?: string }` |
 | `docker.compose` | `{ action: "up"\|"down", projectPath: string }` |
-| `image.digest` | `{ image: string, auth?: ... }` |
+| `image.digest` | `{ image: string, auth?: ... }` → remote registry digest |
+| `image.runningDigest` | `{ id: string }` → digests of the image the container is running |
+| `image.checkUpdate` | `{ id|containerId, image, auth? }` → `{ updateAvailable, remoteDigest, localDigests }` |
 | `inventory.disk` | `{}` |
 
 ## Events (agent → server)

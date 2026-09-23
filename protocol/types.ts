@@ -12,6 +12,8 @@ export type CommandType =
   | 'docker.recreate'
   | 'docker.compose'
   | 'image.digest'
+  | 'image.runningDigest'
+  | 'image.checkUpdate'
   | 'inventory.disk';
 
 export type EventType =
