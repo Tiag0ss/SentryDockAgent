@@ -1,0 +1,12 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE:-app:local}
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+    # env_file: .env.production
+    restart: unless-stopped

@@ -1,0 +1,27 @@
+---
+description: Typing, catch blocks, logging, and user-facing errors (JS/TS)
+globs: "**/*.{ts,tsx,js}"
+alwaysApply: false
+---
+
+# Types and errors
+
+- No empty `catch` / silent swallow. Log or rethrow with context.
+- Avoid `any` and unjustified casts (`as`). Prefer proper types or narrow safely.
+- User-facing errors ≠ internal stack traces. Return safe messages; log details server-side.
+- Prefer a project `logger` over `console` in server/production paths.
+
+```typescript
+// BAD
+try {
+  await save(data);
+} catch (e) {}
+
+// GOOD
+try {
+  await save(data);
+} catch (e) {
+  logger.error('save failed', { error: e instanceof Error ? e.message : e });
+  throw e;
+}
+```

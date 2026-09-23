@@ -1,0 +1,35 @@
+---
+description: Small React components — no giant page files; prefer reuse
+globs: "**/*.{tsx,jsx}"
+alwaysApply: false
+---
+
+# React components — small and reusable
+
+Agents often dump a whole page (markup, state, handlers, fetch) into one `.tsx`. Do not.
+
+## Rules
+
+- **Pages/routes orchestrate** (data, layout slots). They must not contain large inline UI trees.
+- Extract a component when a block has its own markup + state/handlers, or when the same UI will be reused.
+- Prefer reusable components over copy-paste JSX.
+  - Shared (2+ features) → `components/` (or `src/components/` for Vite/SPA)
+  - Feature-only → follow the stack structure rule (`app/<feature>/_components/` or `src/pages/<Feature>/components/`)
+- Soft limit: if a `.tsx` grows past **~150 lines**, split before adding more. Real UI units — not one-line wrappers (YAGNI).
+- One component, one job. Pass props instead of duplicating JSX.
+- Naming: `PascalCase.tsx` for components; hooks `useThing.ts`; avoid `Component2`, `Helper`, `Utils.tsx`.
+
+```tsx
+// BAD — everything in page.tsx (fetch + table + modal + filters inline)
+
+// GOOD — page composes pieces
+export default function UsersPage() {
+  return (
+    <>
+      <UsersFilters />
+      <UsersTable />
+      <UserEditModal />
+    </>
+  );
+}
+```

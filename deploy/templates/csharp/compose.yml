@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PROJECT: src/YourApp.Api/YourApp.Api.csproj
+        DLL: YourApp.Api.dll
+    image: ${IMAGE:-app:local}
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+    # env_file: .env.production
+    restart: unless-stopped

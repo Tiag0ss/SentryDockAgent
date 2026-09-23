@@ -1,0 +1,15 @@
+services:
+  agent:
+    build: .
+    environment:
+      SENTRYDOCK_URL: ${SENTRYDOCK_URL:-http://host.docker.internal:3000}
+      SENTRYDOCK_GRPC_URL: ${SENTRYDOCK_GRPC_URL:-host.docker.internal:50051}
+      AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN}
+      AGENT_NAME: ${AGENT_NAME:-agent-1}
+      AGENT_TRANSPORT: ${AGENT_TRANSPORT:-ws}
+      DOCKER_SOCKET: /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -1,0 +1,20 @@
+---
+description: Secrets, injection, server authz, and safe logging
+alwaysApply: true
+---
+
+# Security
+
+- Never commit secrets, `.env`, API keys, or credentials. Use env vars / secret stores.
+- Do not build SQL or shell commands by concatenating untrusted input — use parameters / safe APIs.
+- Mutations require **server-side** authorization checks (UI checks are not enough).
+- Do not log tokens, passwords, session cookies, or unnecessary PII.
+- Validate untrusted input at the trust boundary (HTTP body/query, file uploads, webhooks).
+
+```typescript
+// BAD
+await pool.query(`SELECT * FROM users WHERE id = ${req.params.id}`);
+
+// GOOD
+await pool.execute('SELECT * FROM users WHERE id = ?', [req.params.id]);
+```

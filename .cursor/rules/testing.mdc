@@ -1,0 +1,15 @@
+---
+description: Tests — match runner, colocate or mirror src, no new frameworks unasked
+globs: "**/*.{test,spec}.{ts,tsx,js,jsx,cs},**/tests/**/*,**/__tests__/**/*"
+alwaysApply: false
+---
+
+# Testing
+
+- Use the **existing** test runner and layout (Vitest, Jest, Playwright, xUnit, pytest, etc.). Do not add a framework unless the user asks.
+- Prefer tests next to code (`*.test.ts`) **or** a mirrored `tests/` tree — match the repo.
+- Cover behavior that can regress: API status/authz, pure logic, critical UI flows when e2e exists.
+- Skip pure copy/CSS-only changes unless the user asks.
+- Deterministic tests: no real network/clock/secrets; mock at boundaries the project already mocks.
+- Name tests after the behavior (`creates item for owner`), not implementation trivia.
+- Run the project’s test script before claiming done when you added or changed tests.

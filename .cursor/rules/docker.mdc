@@ -1,0 +1,18 @@
+---
+description: Docker and Compose — multi-stage, non-root, healthchecks, templates
+globs: "**/Dockerfile*,**/compose*.yml,**/docker-compose*.yml,**/.dockerignore"
+alwaysApply: false
+---
+
+# Docker
+
+- Prefer **multi-stage** builds. Keep final images small.
+- Run as a **non-root** user in the final stage when practical.
+- **Pin tags** (digest or specific version). Avoid `latest` in production compose.
+- Include a `.dockerignore` (node_modules, .git, secrets, build artifacts).
+- Add a healthcheck when the app exposes `/health` (or the project’s health path).
+- Never bake secrets into the image. Pass via env / secrets at runtime.
+- **Start from** `deploy/templates/<stack>/` (nextjs, node, csharp, static-nginx). Copy/adapt to the project root; do not invent services the app does not use.
+- Compose: name networks only when multiple services need them; use `depends_on` + healthchecks for app↔DB. Prefer one compose file for local; avoid unrelated sidecars.
+- Build args for compile-time config only (public). Runtime config → env at `compose up`.
+- Align the template with the stack pack (e.g. Node Express → build TypeScript, CMD on compiled entry — not a fictional `server.js` at repo root).

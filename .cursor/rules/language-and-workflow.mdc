@@ -1,0 +1,27 @@
+---
+description: Language, structure discipline, minimal diffs, YAGNI
+alwaysApply: true
+---
+
+# Language and workflow
+
+## Language
+
+- Reply in **English (EN)** only.
+- Understand European Portuguese; never reply in PT or PT-BR unless the user explicitly asks for Portuguese in that reply.
+- Non-English UI strings require explicit user approval first.
+
+## Structure (mandatory)
+
+- Before adding files, read `AGENTS.md` and the stack’s **structure** rule (e.g. `web-next-structure.mdc`, `node-express-structure.mdc`).
+- Place new code in the **canonical folders** for that stack. Do not invent parallel trees (`src/components` vs `components`, random `utils/` at root, etc.).
+- If the destination already has a clear, consistent layout that differs from the kit: **match the destination** for new files. Do not mass-migrate folders unless the user asks.
+- If the repo is empty / greenfield: follow the kit structure exactly.
+- One concern per file; prefer small modules over “god” files.
+
+## Workflow
+
+- Prefer the **smallest diff** that solves the request. Match existing project style.
+- **YAGNI**: do not add dependencies, abstractions, or folders the task does not need.
+- Commit **only** when the user asks.
+- For user-visible web UI changes, verify in the browser when tools allow it.

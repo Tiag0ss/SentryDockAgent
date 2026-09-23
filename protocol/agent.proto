@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package sentrydock.agent.v1;
+
+service AgentService {
+  rpc Connect (stream AgentMessage) returns (stream ServerMessage);
+}
+
+message AgentMessage {
+  string request_id = 1;
+  string type = 2;
+  string payload_json = 3;
+}
+
+message ServerMessage {
+  string request_id = 1;
+  string type = 2;
+  string payload_json = 3;
+}
