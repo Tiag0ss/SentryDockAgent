@@ -9,7 +9,8 @@ export async function connectWs(opts: {
   hello: Envelope;
   onCommand: (env: Envelope, reply: (env: Envelope) => void) => Promise<void>;
   onReady: (send: (env: Envelope) => void) => void;
-}) {
+  onDisconnected?: () => void;
+}): Promise<void> {
   const socket: Socket = io(`${opts.url}/agents`, {
     transports: ['websocket'],
     auth: {
@@ -17,14 +18,20 @@ export async function connectWs(opts: {
       agentName: opts.agentName,
     },
     reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1_000,
+    reconnectionDelayMax: 30_000,
+    randomizationFactor: 0.4,
+    timeout: 20_000,
   });
 
   const send = (env: Envelope) => {
+    if (!socket.connected) return;
     socket.emit('event', env);
   };
 
   socket.on('connect', () => {
-    logger.info('Connected via WebSocket');
+    logger.info(socket.recovered ? 'WebSocket recovered' : 'Connected via WebSocket');
     send(opts.hello);
     opts.onReady(send);
   });
@@ -39,5 +46,14 @@ export async function connectWs(opts: {
 
   socket.on('disconnect', (reason) => {
     logger.warn('WS disconnected', { reason });
+    opts.onDisconnected?.();
+  });
+
+  socket.io.on('reconnect_attempt', (n) => {
+    logger.info('WS reconnect attempt', { attempt: n });
+  });
+
+  socket.io.on('reconnect_failed', () => {
+    logger.error('WS reconnect failed');
   });
 }

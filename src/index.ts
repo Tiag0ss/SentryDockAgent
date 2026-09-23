@@ -23,6 +23,10 @@ if (!token) {
 
 const docker = createDocker();
 
+/** Latest transport send — updated on (re)connect; heartbeats use this ref. */
+let sendFn: ((env: Envelope) => void) | null = null;
+let heartbeatsStarted = false;
+
 async function onCommand(env: Envelope, reply: (env: Envelope) => void) {
   try {
     const data = await handleCommand(docker, env.type, env.payload);
@@ -44,6 +48,39 @@ async function onCommand(env: Envelope, reply: (env: Envelope) => void) {
   }
 }
 
+function onReady(send: (e: Envelope) => void) {
+  sendFn = send;
+  if (heartbeatsStarted) return;
+  heartbeatsStarted = true;
+
+  setInterval(() => {
+    if (!sendFn) return;
+    sendFn({
+      requestId: `hb-${Date.now()}`,
+      type: 'heartbeat',
+      payload: { ts: Date.now() },
+    });
+  }, 15_000);
+
+  setInterval(async () => {
+    if (!sendFn) return;
+    try {
+      const inv = await handleCommand(docker, 'inventory.disk', {});
+      sendFn({
+        requestId: `inv-${Date.now()}`,
+        type: 'inventory',
+        payload: inv,
+      });
+    } catch (err) {
+      logger.warn('inventory.disk failed', { err: err instanceof Error ? err.message : String(err) });
+    }
+  }, 60_000);
+}
+
+function onDisconnected() {
+  sendFn = null;
+}
+
 async function main() {
   const hello: Envelope = {
     requestId: 'hello',
@@ -57,29 +94,6 @@ async function main() {
     },
   };
 
-  const sendHeartbeat = (send: (e: Envelope) => void) => {
-    setInterval(() => {
-      send({
-        requestId: `hb-${Date.now()}`,
-        type: 'heartbeat',
-        payload: { ts: Date.now() },
-      });
-    }, 15_000);
-
-    setInterval(async () => {
-      try {
-        const inv = await handleCommand(docker, 'inventory.disk', {});
-        send({
-          requestId: `inv-${Date.now()}`,
-          type: 'inventory',
-          payload: inv,
-        });
-      } catch (err) {
-        logger.warn('inventory.disk failed', { err: err instanceof Error ? err.message : String(err) });
-      }
-    }, 60_000);
-  };
-
   if (transport === 'grpc') {
     const grpcUrl = process.env.SENTRYDOCK_GRPC_URL || url.replace(/^https?:\/\//, '').replace(/:\d+$/, '') + ':50051';
     await connectGrpc({
@@ -88,7 +102,8 @@ async function main() {
       agentName,
       hello,
       onCommand,
-      onReady: sendHeartbeat,
+      onReady,
+      onDisconnected,
     });
   } else {
     await connectWs({
@@ -97,7 +112,8 @@ async function main() {
       agentName,
       hello,
       onCommand,
-      onReady: sendHeartbeat,
+      onReady,
+      onDisconnected,
     });
   }
 }
