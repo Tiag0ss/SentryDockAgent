@@ -55,11 +55,20 @@ function onReady(send: (e: Envelope) => void) {
 
   setInterval(() => {
     if (!sendFn) return;
-    sendFn({
-      requestId: `hb-${Date.now()}`,
-      type: 'heartbeat',
-      payload: { ts: Date.now() },
-    });
+    void (async () => {
+      let containers: number | undefined;
+      try {
+        const list = await handleCommand(docker, 'docker.list', { all: false }) as unknown[];
+        containers = Array.isArray(list) ? list.length : undefined;
+      } catch {
+        /* ignore */
+      }
+      sendFn!({
+        requestId: `hb-${Date.now()}`,
+        type: 'heartbeat',
+        payload: { ts: Date.now(), ...(containers != null ? { containers } : {}) },
+      });
+    })();
   }, 15_000);
 
   setInterval(async () => {

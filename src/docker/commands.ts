@@ -249,14 +249,36 @@ export async function handleCommand(
   switch (type as CommandType) {
       case 'docker.list': {
         const containers = await docker.listContainers({ all: Boolean(p.all ?? true) });
-        return containers.map((c) => ({
-          id: c.Id,
-          names: c.Names,
-          image: c.Image,
-          imageId: c.ImageID,
-          state: c.State,
-          status: c.Status,
-        }));
+        const images = await docker.listImages().catch(() => [] as Array<{ Id?: string; RepoTags?: string[] | null }>);
+        const tagById = new Map<string, string>();
+        for (const img of images) {
+          const tag = img.RepoTags?.find((t) => t && t !== '<none>:<none>');
+          if (!tag || !img.Id) continue;
+          tagById.set(img.Id, tag);
+          const short = img.Id.replace(/^sha256:/, '').slice(0, 12);
+          if (short) tagById.set(short, tag);
+        }
+        return containers.map((c) => {
+          const labels = c.Labels || {};
+          const name = (c.Names?.[0] || c.Id).replace(/^\//, '');
+          let image = c.Image || '';
+          if (!image || image.startsWith('sha256:')) {
+            image = tagById.get(c.ImageID || '')
+              || tagById.get((c.ImageID || '').replace(/^sha256:/, '').slice(0, 12))
+              || image;
+          }
+          return {
+            id: c.Id,
+            name,
+            names: c.Names,
+            image,
+            imageId: c.ImageID,
+            state: c.State,
+            status: c.Status,
+            composeProject: labels['com.docker.compose.project'] || undefined,
+            composeService: labels['com.docker.compose.service'] || undefined,
+          };
+        });
       }
       case 'docker.inspect': {
         const id = String(p.id);
@@ -268,13 +290,32 @@ export async function handleCommand(
         return { pulled: image };
       }
       case 'docker.recreate': {
-        const { id, image } = p as unknown as DockerRecreatePayload;
+        const { id, image, desiredDigest } = p as unknown as DockerRecreatePayload;
         const container = docker.getContainer(id);
         const info = await container.inspect();
         const name = info.Name.replace(/^\//, '');
         const wasRunning = info.State.Running;
-        // Prefer explicit image / Config.Image (tag) so we pick up the freshly pulled tag
         const imageRef = image || info.Config.Image || info.Image;
+
+        if (desiredDigest) {
+          const want = normalizeDigest(desiredDigest);
+          const running = await getRunningImageDigests(docker, id);
+          const already =
+            (want && running.digests.includes(want))
+            || (want && normalizeDigest(running.imageId) === want)
+            || (want && String(running.imageId).toLowerCase().includes(want.replace(/^sha256:/, '')));
+          if (already) {
+            logger.info('docker.recreate skipped (already at desired digest)', { name, desiredDigest: want });
+            return {
+              id: info.Id,
+              name,
+              image: imageRef,
+              imageId: running.imageId,
+              skipped: true,
+              reason: 'already_at_desired_digest',
+            };
+          }
+        }
 
         // Strip fields that Docker rejects when re-creating from an inspect dump
         const hostConfig = { ...(info.HostConfig || {}) } as Record<string, unknown>;
@@ -327,7 +368,7 @@ export async function handleCommand(
           ExposedPorts: info.Config.ExposedPorts,
           Volumes: info.Config.Volumes,
           HostConfig: hostConfig as Docker.ContainerCreateOptions['HostConfig'],
-          NetworkingConfig: networkingConfig,
+          NetworkingConfig: networkingConfig as Docker.ContainerCreateOptions['NetworkingConfig'],
         });
         if (wasRunning) await created.start();
         const after = await created.inspect();
@@ -388,13 +429,28 @@ export async function handleCommand(
       }
       case 'inventory.disk': {
         const df = await docker.df();
-        const images = (df.Images || []) as Array<{ Dangling?: boolean; SharedSize?: number }>;
+        const images = (df.Images || []) as Array<{ Dangling?: boolean; SharedSize?: number; Size?: number }>;
         const dangling = images.filter((i) => i.Dangling).length;
-        const layersSize = images.reduce((s, i) => s + (i.SharedSize || 0), 0);
+        const layersSize = images.reduce((s, i) => s + (i.Size || i.SharedSize || 0), 0);
+        let diskTotalBytes: number | null = null;
+        try {
+          const info = await docker.info();
+          // Docker Desktop / engine may expose dockerRootDir; try df -B1 on host path via shell
+          const root = String((info as { DockerRootDir?: string }).DockerRootDir || '/var/lib/docker');
+          const { stdout } = await execFileAsync('df', ['-B1', '--output=size', root], {
+            timeout: 5000,
+            maxBuffer: 64 * 1024,
+          });
+          const line = stdout.trim().split('\n').pop();
+          const n = Number(line);
+          if (Number.isFinite(n) && n > 0) diskTotalBytes = n;
+        } catch {
+          /* optional */
+        }
         return {
           danglingImages: dangling,
           diskUsedBytes: layersSize,
-          diskTotalBytes: null,
+          diskTotalBytes,
         };
       }
       default:
