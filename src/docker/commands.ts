@@ -32,6 +32,47 @@ function normalizeDigest(value: string | undefined | null): string | null {
   return m ? m[0].toLowerCase() : null;
 }
 
+/** True when the ref is an image id / digest, not a pullable name:tag. */
+function isImageIdRef(value: string | undefined | null): boolean {
+  if (!value) return false;
+  const v = String(value).trim();
+  if (/^sha256:[a-f0-9]{64}$/i.test(v)) return true;
+  if (/^[a-f0-9]{64}$/i.test(v)) return true;
+  if (/^sha256:[a-f0-9]{12,}$/i.test(v) && !v.includes('/')) return true;
+  return false;
+}
+
+function pickRepoTag(repoTags: string[] | null | undefined): string | null {
+  if (!repoTags?.length) return null;
+  const tag = repoTags.find((t) => t && t !== '<none>:<none>');
+  return tag || null;
+}
+
+/**
+ * Prefer a human pullable image ref (name:tag). Never invent a sha256 create name
+ * when a RepoTag or Config.Image name is available.
+ */
+async function resolveImageRef(
+  docker: Docker,
+  preferred: string | undefined | null,
+  fallbacks: Array<string | undefined | null> = [],
+): Promise<string> {
+  const candidates = [preferred, ...fallbacks].map((c) => (c ? String(c).trim() : '')).filter(Boolean);
+  for (const c of candidates) {
+    if (!isImageIdRef(c)) return c;
+  }
+  for (const c of candidates) {
+    try {
+      const insp = await docker.getImage(c).inspect();
+      const tag = pickRepoTag(insp.RepoTags);
+      if (tag) return tag;
+    } catch {
+      /* try next */
+    }
+  }
+  return candidates[0] || '';
+}
+
 /** Extract sha256 digests from RepoDigests like `repo@sha256:...`. */
 function digestsFromRepoDigests(repoDigests: string[] | undefined): string[] {
   if (!repoDigests?.length) return [];
@@ -211,16 +252,25 @@ async function checkImageUpdate(
   const running = await getRunningImageDigests(docker, containerId);
   const beforeId = running.imageId;
 
-  await pullImage(docker, image, auth);
+  // Never pull by raw image id — recover the name:tag from the running container.
+  const imageRef = await resolveImageRef(docker, image, [running.configImage]);
+  if (!imageRef || isImageIdRef(imageRef)) {
+    throw new Error(
+      `Cannot check update: need a name:tag image reference (got "${image || running.configImage || beforeId}"). Re-select the image in the flow.`,
+    );
+  }
 
-  const latest = await docker.getImage(image).inspect();
+  await pullImage(docker, imageRef, auth);
+
+  const latest = await docker.getImage(imageRef).inspect();
   const latestId = String(latest.Id || '');
   const repoDigests = digestsFromRepoDigests(latest.RepoDigests);
 
   const updateAvailable = Boolean(beforeId && latestId && beforeId !== latestId);
 
   logger.info('image.checkUpdate', {
-    image,
+    image: imageRef,
+    requestedImage: image,
     containerId,
     beforeId,
     latestId,
@@ -236,7 +286,7 @@ async function checkImageUpdate(
     localDigests: beforeId ? [beforeId] : [],
     imageId: beforeId,
     configImage: running.configImage,
-    image,
+    image: imageRef,
   };
 }
 
@@ -252,27 +302,36 @@ export async function handleCommand(
         const images = await docker.listImages().catch(() => [] as Array<{ Id?: string; RepoTags?: string[] | null }>);
         const tagById = new Map<string, string>();
         for (const img of images) {
-          const tag = img.RepoTags?.find((t) => t && t !== '<none>:<none>');
+          const tag = pickRepoTag(img.RepoTags);
           if (!tag || !img.Id) continue;
           tagById.set(img.Id, tag);
-          const short = img.Id.replace(/^sha256:/, '').slice(0, 12);
+          const bare = img.Id.replace(/^sha256:/, '');
+          if (bare) tagById.set(bare, tag);
+          const short = bare.slice(0, 12);
           if (short) tagById.set(short, tag);
+          tagById.set(`sha256:${short}`, tag);
         }
         return containers.map((c) => {
           const labels = c.Labels || {};
           const name = (c.Names?.[0] || c.Id).replace(/^\//, '');
-          let image = c.Image || '';
-          if (!image || image.startsWith('sha256:')) {
-            image = tagById.get(c.ImageID || '')
-              || tagById.get((c.ImageID || '').replace(/^sha256:/, '').slice(0, 12))
-              || image;
+          const listed = c.Image || '';
+          const imageId = c.ImageID || '';
+          let image = listed;
+          if (!image || isImageIdRef(image)) {
+            image = tagById.get(imageId)
+              || tagById.get(imageId.replace(/^sha256:/, ''))
+              || tagById.get(imageId.replace(/^sha256:/, '').slice(0, 12))
+              || tagById.get(listed)
+              || tagById.get(listed.replace(/^sha256:/, ''))
+              || listed;
           }
           return {
             id: c.Id,
             name,
             names: c.Names,
             image,
-            imageId: c.ImageID,
+            imageId,
+            configImage: isImageIdRef(listed) ? image : listed,
             state: c.State,
             status: c.Status,
             composeProject: labels['com.docker.compose.project'] || undefined,
@@ -295,7 +354,16 @@ export async function handleCommand(
         const info = await container.inspect();
         const name = info.Name.replace(/^\//, '');
         const wasRunning = info.State.Running;
-        const imageRef = image || info.Config.Image || info.Image;
+        // Prefer name:tag. Never create with a raw image id when a tag exists —
+        // otherwise Config.Image becomes sha256:… and the UI can no longer pick the real name.
+        const imageRef = await resolveImageRef(
+          docker,
+          image,
+          [info.Config?.Image, info.Image],
+        );
+        if (!imageRef) {
+          throw new Error('docker.recreate requires an image name:tag');
+        }
 
         if (desiredDigest) {
           const want = normalizeDigest(desiredDigest);
@@ -305,7 +373,7 @@ export async function handleCommand(
             || (want && normalizeDigest(running.imageId) === want)
             || (want && String(running.imageId).toLowerCase().includes(want.replace(/^sha256:/, '')));
           if (already) {
-            logger.info('docker.recreate skipped (already at desired digest)', { name, desiredDigest: want });
+            logger.info('docker.recreate skipped (already at desired digest)', { name, desiredDigest: want, imageRef });
             return {
               id: info.Id,
               name,
@@ -375,8 +443,10 @@ export async function handleCommand(
         logger.info('docker.recreate done', {
           name,
           imageRef,
+          requestedImage: image,
           newId: created.id,
           newImage: after.Image,
+          configImage: after.Config?.Image,
         });
         return {
           id: created.id,
