@@ -6,6 +6,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { CommandType, DockerRecreatePayload, RegistryAuth } from '../../protocol/types.js';
 import logger from '../logger.js';
+import {
+  normalizeDigest,
+  isImageIdRef,
+  pickRepoTag,
+  pinImageToDigest,
+  digestsFromRepoDigests,
+} from './imageRef.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -149,44 +156,6 @@ function registryAuthHeader(auth?: RegistryAuth): string | undefined {
   ).toString('base64');
 }
 
-function normalizeDigest(value: string | undefined | null): string | null {
-  if (!value) return null;
-  const m = String(value).match(/sha256:[a-f0-9]{64}/i);
-  return m ? m[0].toLowerCase() : null;
-}
-
-/** True when the ref is an image id / digest, not a pullable name:tag. */
-function isImageIdRef(value: string | undefined | null): boolean {
-  if (!value) return false;
-  const v = String(value).trim();
-  if (/^sha256:[a-f0-9]{64}$/i.test(v)) return true;
-  if (/^[a-f0-9]{64}$/i.test(v)) return true;
-  if (/^sha256:[a-f0-9]{12,}$/i.test(v) && !v.includes('/')) return true;
-  return false;
-}
-
-function pickRepoTag(repoTags: string[] | null | undefined): string | null {
-  if (!repoTags?.length) return null;
-  const tag = repoTags.find((t) => t && t !== '<none>:<none>');
-  return tag || null;
-}
-
-/**
- * Build a digest-pinned ref (`repo@sha256:…`) so `:latest` (or any mutable tag)
- * cannot resolve to a different image after a pull.
- */
-function pinImageToDigest(imageRef: string, digest: string): string {
-  const dig = normalizeDigest(digest);
-  if (!dig) return imageRef;
-  if (isImageIdRef(imageRef)) return dig;
-
-  const withoutAt = imageRef.replace(/@sha256:[a-f0-9]+$/i, '');
-  const slash = withoutAt.lastIndexOf('/');
-  const colon = withoutAt.lastIndexOf(':');
-  const repo = colon > slash ? withoutAt.slice(0, colon) : withoutAt;
-  return `${repo}@${dig}`;
-}
-
 /**
  * Resolve a local image that matches desiredDigest.
  * Prefers `repo@sha256:…` (keeps the name for Config.Image); falls back to image id.
@@ -248,14 +217,6 @@ async function resolveImageRef(
     }
   }
   return candidates[0] || '';
-}
-
-/** Extract sha256 digests from RepoDigests like `repo@sha256:...`. */
-function digestsFromRepoDigests(repoDigests: string[] | undefined): string[] {
-  if (!repoDigests?.length) return [];
-  return repoDigests
-    .map((d) => normalizeDigest(d))
-    .filter((d): d is string => Boolean(d));
 }
 
 function dialJson(

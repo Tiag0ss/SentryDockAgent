@@ -7,7 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",
@@ -19,9 +22,13 @@
     "zod": "^3.25.36"
   },
   "devDependencies": {
+    "@eslint/js": "^9.27.0",
     "@types/dockerode": "^3.3.38",
     "@types/node": "^22.15.21",
+    "eslint": "^9.27.0",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.32.1",
+    "vitest": "^5.0.2"
   }
 }

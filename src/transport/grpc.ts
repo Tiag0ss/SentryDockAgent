@@ -41,7 +41,6 @@ function loadClient(address: string) {
 }
 
 function openSession(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   client: any,
   opts: GrpcOpts,
 ): Promise<void> {
