@@ -172,6 +172,60 @@ function pickRepoTag(repoTags: string[] | null | undefined): string | null {
 }
 
 /**
+ * Build a digest-pinned ref (`repo@sha256:…`) so `:latest` (or any mutable tag)
+ * cannot resolve to a different image after a pull.
+ */
+function pinImageToDigest(imageRef: string, digest: string): string {
+  const dig = normalizeDigest(digest);
+  if (!dig) return imageRef;
+  if (isImageIdRef(imageRef)) return dig;
+
+  const withoutAt = imageRef.replace(/@sha256:[a-f0-9]+$/i, '');
+  const slash = withoutAt.lastIndexOf('/');
+  const colon = withoutAt.lastIndexOf(':');
+  const repo = colon > slash ? withoutAt.slice(0, colon) : withoutAt;
+  return `${repo}@${dig}`;
+}
+
+/**
+ * Resolve a local image that matches desiredDigest.
+ * Prefers `repo@sha256:…` (keeps the name for Config.Image); falls back to image id.
+ * Throws if the previous layers were pruned after pull — rollback cannot invent them.
+ */
+async function resolvePinnedCreateImage(
+  docker: Docker,
+  imageRef: string,
+  desiredDigest: string,
+): Promise<string> {
+  const dig = normalizeDigest(desiredDigest);
+  if (!dig) return imageRef;
+
+  const pinned = pinImageToDigest(imageRef, dig);
+  for (const candidate of [pinned, dig]) {
+    try {
+      await docker.getImage(candidate).inspect();
+      return candidate;
+    } catch {
+      /* try next */
+    }
+  }
+
+  const images = await docker.listImages({ all: true });
+  for (const img of images) {
+    const idDig = normalizeDigest(img.Id);
+    if (idDig === dig) return String(img.Id);
+    const fromRepo = digestsFromRepoDigests(img.RepoDigests);
+    if (fromRepo.includes(dig)) return String(img.Id);
+  }
+
+  throw new Error(
+    `Cannot rollback: previous image ${dig} is not available locally `
+    + `(tag ${imageRef} now points elsewhere and the old layers were removed). `
+    + 'Keep dangling images after pull, or avoid pruning until rollback completes.',
+  );
+}
+
+/**
  * Prefer a human pullable image ref (name:tag). Never invent a sha256 create name
  * when a RepoTag or Config.Image name is available.
  */
@@ -488,6 +542,13 @@ export async function handleCommand(
           throw new Error('docker.recreate requires an image name:tag');
         }
 
+        // When desiredDigest is set (update or rollback):
+        // - If name:tag already resolves to that digest (typical update after pull),
+        //   create with the tag so Config.Image stays `repo:latest` and compose can
+        //   manage the service normally afterwards.
+        // - If the tag points elsewhere (rollback after `:latest` moved), pin with
+        //   `repo@sha256:…` so we actually get the previous layers back.
+        let createImage = imageRef;
         if (desiredDigest) {
           const want = normalizeDigest(desiredDigest);
           const running = await getRunningImageDigests(docker, id);
@@ -506,6 +567,21 @@ export async function handleCommand(
               reason: 'already_at_desired_digest',
             };
           }
+
+          let tagMatchesDesired = false;
+          if (want && !isImageIdRef(imageRef) && !/@sha256:/i.test(imageRef)) {
+            try {
+              const tagInsp = await docker.getImage(imageRef).inspect();
+              tagMatchesDesired =
+                normalizeDigest(tagInsp.Id) === want
+                || digestsFromRepoDigests(tagInsp.RepoDigests).includes(want);
+            } catch {
+              tagMatchesDesired = false;
+            }
+          }
+          createImage = tagMatchesDesired
+            ? imageRef
+            : await resolvePinnedCreateImage(docker, imageRef, want || String(desiredDigest));
         }
 
         // Strip fields that Docker rejects when re-creating from an inspect dump
@@ -549,7 +625,7 @@ export async function handleCommand(
 
         const created = await docker.createContainer({
           name,
-          Image: imageRef,
+          Image: createImage,
           Env: info.Config.Env,
           Cmd: info.Config.Cmd ?? undefined,
           Entrypoint: info.Config.Entrypoint ?? undefined,
@@ -566,6 +642,8 @@ export async function handleCommand(
         logger.info('docker.recreate done', {
           name,
           imageRef,
+          createImage,
+          desiredDigest: desiredDigest ? normalizeDigest(desiredDigest) : undefined,
           requestedImage: image,
           newId: created.id,
           newImage: after.Image,
@@ -575,6 +653,7 @@ export async function handleCommand(
           id: created.id,
           name,
           image: imageRef,
+          createImage,
           imageId: after.Image,
           startedAt: after.State?.StartedAt,
         };
@@ -587,9 +666,13 @@ export async function handleCommand(
             'docker.compose requires projectPath (path to docker-compose.yml). For standalone containers use recreate_container instead.',
           );
         }
+        const forceRecreate = Boolean(p.forceRecreate);
         const args =
           action === 'up'
-            ? ['compose', '-f', projectPath, 'up', '-d', '--pull', 'always']
+            ? [
+              'compose', '-f', projectPath, 'up', '-d', '--pull', 'always',
+              ...(forceRecreate || Boolean(p.image) ? ['--force-recreate'] : []),
+            ]
             : ['compose', '-f', projectPath, 'down'];
         const { stdout, stderr } = await execFileAsync('docker', args, {
           timeout: 10 * 60 * 1000,
@@ -602,6 +685,7 @@ export async function handleCommand(
         const yaml = String(p.yaml || '');
         if (!yaml.trim()) throw new Error('docker.compose.apply requires yaml');
         const action = (String(p.action || 'up') === 'down' ? 'down' : 'up') as 'up' | 'down';
+        const forceRecreate = Boolean(p.forceRecreate);
         const envMap = (p.env && typeof p.env === 'object' && !Array.isArray(p.env))
           ? Object.fromEntries(
             Object.entries(p.env as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')]),
@@ -626,9 +710,15 @@ export async function handleCommand(
         await fs.writeFile(composeFile, yaml.replace(/\r\n/g, '\n'), 'utf8');
         await fs.writeFile(envFile, formatDotEnv(envMap), 'utf8');
 
+        // --force-recreate is required after digest-pinned rollbacks / :latest pulls:
+        // compose config hash is unchanged, so without it containers stay on the old image id.
         const args =
           action === 'up'
-            ? ['compose', '-p', projectName, '-f', composeFile, '--env-file', envFile, 'up', '-d', '--pull', 'always']
+            ? [
+              'compose', '-p', projectName, '-f', composeFile, '--env-file', envFile,
+              'up', '-d', '--pull', 'always',
+              ...(forceRecreate ? ['--force-recreate'] : []),
+            ]
             : ['compose', '-p', projectName, '-f', composeFile, '--env-file', envFile, 'down'];
         const { stdout, stderr } = await execFileAsync('docker', args, {
           cwd: dir,
@@ -656,6 +746,7 @@ export async function handleCommand(
           projectName,
           projectPath: composeFile,
           action,
+          forceRecreate,
           stdout,
           stderr,
           services,

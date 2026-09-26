@@ -24,9 +24,9 @@ Outbound connection from agent with token:
 | `docker.list` | `{ all?: boolean }` |
 | `docker.inspect` | `{ id: string }` |
 | `docker.pull` | `{ image: string, auth?: { username, password, serveraddress } }` |
-| `docker.recreate` | `{ id: string, image?: string, desiredDigest?: string }` |
-| `docker.compose` | `{ action: "up"\|"down", projectPath: string, image?: string }` |
-| `docker.compose.apply` | `{ projectName, yaml, env?, registryAuths?, action?: "up"\|"down" }` |
+| `docker.recreate` | `{ id: string, image?: string, desiredDigest?: string }` — pins `repo@sha256:…` only when the tag no longer resolves to that digest (rollback); otherwise creates with `name:tag` |
+| `docker.compose` | `{ action: "up"\|"down", projectPath: string, image?: string, forceRecreate?: boolean }` |
+| `docker.compose.apply` | `{ projectName, yaml, env?, registryAuths?, action?: "up"\|"down", forceRecreate?: boolean }` — `forceRecreate` → `--force-recreate` so `:latest` updates apply after digest-pinned rollbacks |
 | `docker.compose.status` | `{ projectName }` → `{ exists, services? }` |
 | `image.digest` | `{ image: string, auth?: ... }` → remote registry digest |
 | `image.runningDigest` | `{ id: string }` → digests of the image the container is running |
