@@ -1,5 +1,5 @@
 services:
-  agent:
+  SentryDockAgent:
     build: .
     environment:
       SENTRYDOCK_URL: ${SENTRYDOCK_URL:-http://host.docker.internal:3000}

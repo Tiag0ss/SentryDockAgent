@@ -1,5 +1,5 @@
 {
-  "name": "sentrydock-agent",
+  "name": "SentryDockAgent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
