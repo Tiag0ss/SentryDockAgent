@@ -45,6 +45,43 @@ function sanitizeProjectName(name: string): string {
   return n;
 }
 
+function expandHome(p: string): string {
+  const raw = String(p || '').trim();
+  if (raw === '~') return os.homedir();
+  if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
+  return raw;
+}
+
+/** Resolve a compose file path; accepts a file or a directory with compose.yaml / docker-compose.yml. */
+async function resolveComposeFile(projectPath: string): Promise<string> {
+  const resolved = expandHome(projectPath);
+  if (!resolved) {
+    throw new Error(
+      'docker.compose requires projectPath (path to docker-compose.yml). For standalone containers use recreate_container instead.',
+    );
+  }
+  let st: Awaited<ReturnType<typeof fs.stat>> | null = null;
+  try {
+    st = await fs.stat(resolved);
+  } catch {
+    throw new Error(`compose file not found: ${resolved}`);
+  }
+  if (st.isFile()) return resolved;
+  if (st.isDirectory()) {
+    for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
+      const candidate = path.join(resolved, name);
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        /* try next */
+      }
+    }
+    throw new Error(`no compose file in directory: ${resolved}`);
+  }
+  throw new Error(`invalid compose path: ${resolved}`);
+}
+
 function formatDotEnv(env: Record<string, string>): string {
   return Object.entries(env)
     .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
@@ -621,12 +658,7 @@ export async function handleCommand(
       }
       case 'docker.compose': {
         const action = String(p.action) as 'up' | 'down';
-        const projectPath = String(p.projectPath || '').trim();
-        if (!projectPath) {
-          throw new Error(
-            'docker.compose requires projectPath (path to docker-compose.yml). For standalone containers use recreate_container instead.',
-          );
-        }
+        const projectPath = await resolveComposeFile(String(p.projectPath || ''));
         const forceRecreate = Boolean(p.forceRecreate);
         const args =
           action === 'up'
@@ -636,10 +668,11 @@ export async function handleCommand(
             ]
             : ['compose', '-f', projectPath, 'down'];
         const { stdout, stderr } = await execFileAsync('docker', args, {
+          cwd: path.dirname(projectPath),
           timeout: 10 * 60 * 1000,
           maxBuffer: 10 * 1024 * 1024,
         });
-        return { stdout, stderr };
+        return { stdout, stderr, projectPath };
       }
       case 'docker.compose.apply': {
         const projectName = sanitizeProjectName(String(p.projectName || ''));
@@ -725,7 +758,7 @@ export async function handleCommand(
           exists = false;
         }
         if (!exists) {
-          return { projectName, exists: false, services: [] };
+          return { projectName, exists: false, projectPath: composeFile, services: [] };
         }
         try {
           const ps = await execFileAsync(
