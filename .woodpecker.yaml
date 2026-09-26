@@ -4,8 +4,9 @@ when:
 
 steps:
   check:
-    image: node:22-alpine
+    image: node:22-bookworm-slim
     commands:
+      - apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates && rm -rf /var/lib/apt/lists/*
       - corepack enable
       - corepack prepare pnpm@10 --activate
       - pnpm install --frozen-lockfile

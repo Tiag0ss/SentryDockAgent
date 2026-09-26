@@ -1,3 +1,8 @@
+# Root package only (not a multi-package monorepo).
+# pnpm 11 reads allowBuilds from this file (not package.json).
+packages:
+  - '.'
+
 allowBuilds:
   cpu-features: true
   esbuild: true
