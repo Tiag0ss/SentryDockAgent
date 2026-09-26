@@ -1,0 +1,32 @@
+when:
+  - event: tag
+    ref: refs/tags/V*
+
+steps:
+  check:
+    image: node:22-alpine
+    commands:
+      - corepack enable
+      - corepack prepare pnpm@10 --activate
+      - pnpm install --frozen-lockfile
+      - pnpm lint
+      - pnpm typecheck
+      - pnpm test
+
+  get-version:
+    image: node:22-alpine
+    commands:
+      # Tag format is V<version>, e.g. V0.1.0 — strip the leading V so the
+      # Docker image version matches the git tag exactly.
+      - VERSION=${CI_COMMIT_TAG#V}
+      - echo "latest,$VERSION" > .tags
+
+  build-and-push:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: tiag0ss/sentrydock-agent
+      dockerfile: Dockerfile
+      username:
+        from_secret: DOCKER_USERNAME
+      password:
+        from_secret: DOCKER_PASSWORD

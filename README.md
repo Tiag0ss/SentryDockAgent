@@ -94,6 +94,18 @@ In a container the process runs as root on purpose (socket access), similar to a
 ### Catalog Compose persistence
 
 Projects deployed from the panel are written under `SENTRYDOCK_COMPOSE_DIR/<project>/docker-compose.yml`. The panel database remains the source of truth (redeploy rewrites the files), but without a volume a container recreate still loses local files until the next deploy and can break path-based `compose up` in flows. Keep the named volume from `docker-compose.yml` (or bind-mount a host directory). Do not use `docker compose down -v` unless you intend to drop that data.
+
+### CI / CD
+
+Same split as Synapse / Myelin:
+
+| System | File | When | What |
+|--------|------|------|------|
+| **GitHub Actions** | `.github/workflows/ci.yml` | push/PR to `main`/`master` | `pnpm install`, lint, test, typecheck |
+| **Woodpecker** | `.woodpecker.yaml` | tag `V*` (e.g. `V0.1.0`) | same checks, then build/push `tiag0ss/sentrydock-agent` (`latest` + version) |
+
+Woodpecker needs secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`.
+
 ### Scripts
 
 | Command | Description |
