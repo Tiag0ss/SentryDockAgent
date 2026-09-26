@@ -8,8 +8,14 @@ services:
       AGENT_NAME: ${AGENT_NAME:-agent-1}
       AGENT_TRANSPORT: ${AGENT_TRANSPORT:-ws}
       DOCKER_SOCKET: /var/run/docker.sock
+      # Catalog Compose projects are written here (must be a volume or they vanish on recreate).
+      SENTRYDOCK_COMPOSE_DIR: ${SENTRYDOCK_COMPOSE_DIR:-/var/lib/sentrydock/compose}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - sentrydock_compose:/var/lib/sentrydock/compose
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  sentrydock_compose:

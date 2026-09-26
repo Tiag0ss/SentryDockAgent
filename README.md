@@ -83,6 +83,7 @@ For WebSocket, set `AGENT_TRANSPORT=ws` (no gRPC URL required).
 | `SENTRYDOCK_URL` | — | Panel HTTP(S) URL |
 | `SENTRYDOCK_GRPC_URL` | — | `host:port` when using gRPC |
 | `DOCKER_SOCKET` | auto | Force socket path; unset = auto-detect |
+| `SENTRYDOCK_COMPOSE_DIR` | `~/.sentrydock/compose` | Directory for catalog Compose files (`docker.compose.apply`). **Must be on a volume** when the agent runs in Docker, or updates wipe the files. The bundled `docker-compose.yml` mounts a named volume at `/var/lib/sentrydock/compose`. |
 
 ### Docker socket
 
@@ -90,6 +91,9 @@ By default the agent resolves the same engine as the local `docker` CLI (context
 
 In a container the process runs as root on purpose (socket access), similar to a Portainer-style agent.
 
+### Catalog Compose persistence
+
+Projects deployed from the panel are written under `SENTRYDOCK_COMPOSE_DIR/<project>/docker-compose.yml`. The panel database remains the source of truth (redeploy rewrites the files), but without a volume a container recreate still loses local files until the next deploy and can break path-based `compose up` in flows. Keep the named volume from `docker-compose.yml` (or bind-mount a host directory). Do not use `docker compose down -v` unless you intend to drop that data.
 ### Scripts
 
 | Command | Description |
