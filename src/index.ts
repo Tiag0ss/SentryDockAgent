@@ -14,6 +14,7 @@ const AGENT_VERSION = process.env.AGENT_VERSION || '0.1.0';
 const transport = (process.env.AGENT_TRANSPORT || 'ws') as 'ws' | 'grpc';
 const url = process.env.SENTRYDOCK_URL || 'http://localhost:3000';
 const token = process.env.AGENT_TOKEN || '';
+/** Display label only — authentication is by AGENT_TOKEN. */
 const agentName = process.env.AGENT_NAME || os.hostname();
 
 if (!token) {

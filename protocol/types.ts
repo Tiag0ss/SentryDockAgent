@@ -11,9 +11,13 @@ export type CommandType =
   | 'docker.pull'
   | 'docker.recreate'
   | 'docker.compose'
+  | 'docker.compose.apply'
+  | 'docker.compose.status'
   | 'image.digest'
   | 'image.runningDigest'
   | 'image.checkUpdate'
+  | 'image.listTags'
+  | 'image.listLocal'
   | 'inventory.disk';
 
 export type EventType =

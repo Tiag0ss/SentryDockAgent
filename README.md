@@ -17,7 +17,7 @@ docker compose up -d --build
 
 ## Desenvolvimento local
 
-O `AGENT_NAME` deve coincidir com o nome criado no painel (ou podes deixar qualquer valor — a autenticação é pelo token).
+A autenticação é pelo `AGENT_TOKEN`. O `AGENT_NAME` é só uma label no painel (não identifica o agente).
 
 ```bash
 pnpm install

@@ -1,10 +1,133 @@
 import Docker from 'dockerode';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import type { CommandType, DockerRecreatePayload, RegistryAuth } from '../../protocol/types.js';
 import logger from '../logger.js';
 
 const execFileAsync = promisify(execFile);
+
+async function dockerLogin(auth: RegistryAuth): Promise<void> {
+  const server = auth.serveraddress || 'https://index.docker.io/v1/';
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('docker', ['login', server, '-u', auth.username, '--password-stdin'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `docker login failed (${code})`));
+    });
+    child.stdin.write(auth.password);
+    child.stdin.end();
+  });
+}
+
+function composeRootDir(): string {
+  return process.env.SENTRYDOCK_COMPOSE_DIR
+    || path.join(os.homedir(), '.sentrydock', 'compose');
+}
+
+function sanitizeProjectName(name: string): string {
+  const n = String(name || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
+  if (!n) throw new Error('compose projectName is required');
+  return n;
+}
+
+function formatDotEnv(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
+    .join('\n') + (Object.keys(env).length ? '\n' : '');
+}
+
+/** Parse registry + repository path for tag listing. */
+function parseRegistryRepo(image: string): { registry: string; repository: string; isDockerHub: boolean } {
+  const raw = String(image || '').trim().split('@')[0]!.split(':')[0]!;
+  const parts = raw.split('/');
+  if (parts.length === 1) {
+    return { registry: 'registry-1.docker.io', repository: `library/${parts[0]}`, isDockerHub: true };
+  }
+  const first = parts[0]!;
+  const looksLikeRegistry = first.includes('.') || first.includes(':') || first === 'localhost';
+  if (!looksLikeRegistry) {
+    return { registry: 'registry-1.docker.io', repository: parts.join('/'), isDockerHub: true };
+  }
+  return {
+    registry: first,
+    repository: parts.slice(1).join('/'),
+    isDockerHub: first === 'docker.io' || first === 'index.docker.io' || first === 'registry-1.docker.io',
+  };
+}
+
+async function listImageTags(
+  docker: Docker,
+  imageRepo: string,
+  auth?: RegistryAuth,
+): Promise<string[]> {
+  const { registry, repository, isDockerHub } = parseRegistryRepo(imageRepo);
+  const tags = new Set<string>();
+
+  if (isDockerHub) {
+    try {
+      let url: string | null =
+        `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100&ordering=last_updated`;
+      let pages = 0;
+      while (url && pages < 5) {
+        pages += 1;
+        const res = await fetch(url);
+        if (!res.ok) break;
+        const data = await res.json() as { results?: Array<{ name?: string }>; next?: string | null };
+        for (const row of data.results || []) {
+          if (row.name) tags.add(row.name);
+        }
+        url = data.next || null;
+      }
+    } catch (err) {
+      logger.debug('hub tags failed', { err, repository });
+    }
+  }
+
+  if (tags.size === 0) {
+    try {
+      const proto = registry.includes('localhost') ? 'http' : 'https';
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (auth?.username) {
+        headers.Authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
+      }
+      const res = await fetch(`${proto}://${registry}/v2/${repository}/tags/list`, { headers });
+      if (res.ok) {
+        const data = await res.json() as { tags?: string[] };
+        for (const t of data.tags || []) tags.add(t);
+      }
+    } catch (err) {
+      logger.debug('registry tags/list failed', { err, registry, repository });
+    }
+  }
+
+  if (tags.size === 0) {
+    try {
+      const images = await docker.listImages();
+      const repoOnly = String(imageRepo).split('@')[0]!.split(':')[0]!;
+      const aliases = [repoOnly];
+      if (!repoOnly.includes('/')) aliases.push(`library/${repoOnly}`);
+      for (const img of images) {
+        for (const rt of img.RepoTags || []) {
+          for (const a of aliases) {
+            if (rt.startsWith(`${a}:`)) tags.add(rt.slice(a.length + 1));
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return [...tags].sort();
+}
 
 function asAuth(auth?: RegistryAuth): Docker.AuthConfig | undefined {
   if (!auth?.username) return undefined;
@@ -474,6 +597,105 @@ export async function handleCommand(
         });
         return { stdout, stderr };
       }
+      case 'docker.compose.apply': {
+        const projectName = sanitizeProjectName(String(p.projectName || ''));
+        const yaml = String(p.yaml || '');
+        if (!yaml.trim()) throw new Error('docker.compose.apply requires yaml');
+        const action = (String(p.action || 'up') === 'down' ? 'down' : 'up') as 'up' | 'down';
+        const envMap = (p.env && typeof p.env === 'object' && !Array.isArray(p.env))
+          ? Object.fromEntries(
+            Object.entries(p.env as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')]),
+          )
+          : {};
+
+        const registryAuths = Array.isArray(p.registryAuths) ? p.registryAuths as RegistryAuth[] : [];
+        for (const auth of registryAuths) {
+          if (!auth?.username || !auth?.password) continue;
+          const server = auth.serveraddress || 'https://index.docker.io/v1/';
+          try {
+            await dockerLogin(auth);
+          } catch (err) {
+            throw new Error(`docker login failed for ${server}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        const dir = path.join(composeRootDir(), projectName);
+        await fs.mkdir(dir, { recursive: true });
+        const composeFile = path.join(dir, 'docker-compose.yml');
+        const envFile = path.join(dir, '.env');
+        await fs.writeFile(composeFile, yaml.replace(/\r\n/g, '\n'), 'utf8');
+        await fs.writeFile(envFile, formatDotEnv(envMap), 'utf8');
+
+        const args =
+          action === 'up'
+            ? ['compose', '-p', projectName, '-f', composeFile, '--env-file', envFile, 'up', '-d', '--pull', 'always']
+            : ['compose', '-p', projectName, '-f', composeFile, '--env-file', envFile, 'down'];
+        const { stdout, stderr } = await execFileAsync('docker', args, {
+          cwd: dir,
+          env: { ...process.env, ...envMap },
+          timeout: 10 * 60 * 1000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+
+        let services: unknown[] = [];
+        try {
+          const ps = await execFileAsync(
+            'docker',
+            ['compose', '-p', projectName, '-f', composeFile, 'ps', '--format', 'json'],
+            { cwd: dir, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+          );
+          const lines = ps.stdout.trim().split('\n').filter(Boolean);
+          services = lines.map((line) => {
+            try { return JSON.parse(line); } catch { return { raw: line }; }
+          });
+        } catch {
+          /* optional */
+        }
+
+        return {
+          projectName,
+          projectPath: composeFile,
+          action,
+          stdout,
+          stderr,
+          services,
+        };
+      }
+      case 'docker.compose.status': {
+        const projectName = sanitizeProjectName(String(p.projectName || ''));
+        const dir = path.join(composeRootDir(), projectName);
+        const composeFile = path.join(dir, 'docker-compose.yml');
+        let exists = false;
+        try {
+          await fs.access(composeFile);
+          exists = true;
+        } catch {
+          exists = false;
+        }
+        if (!exists) {
+          return { projectName, exists: false, services: [] };
+        }
+        try {
+          const ps = await execFileAsync(
+            'docker',
+            ['compose', '-p', projectName, '-f', composeFile, 'ps', '-a', '--format', 'json'],
+            { cwd: dir, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+          );
+          const lines = ps.stdout.trim().split('\n').filter(Boolean);
+          const services = lines.map((line) => {
+            try { return JSON.parse(line); } catch { return { raw: line }; }
+          });
+          return { projectName, exists: true, projectPath: composeFile, services };
+        } catch (err) {
+          return {
+            projectName,
+            exists: true,
+            projectPath: composeFile,
+            services: [],
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
       case 'image.digest': {
         const image = String(p.image);
         const auth = p.auth as RegistryAuth | undefined;
@@ -496,6 +718,37 @@ export async function handleCommand(
           String(p.image),
           p.auth as RegistryAuth | undefined,
         );
+      }
+      case 'image.listTags': {
+        const imageRepo = String(p.imageRepo || p.image || '');
+        if (!imageRepo) throw new Error('image.listTags requires imageRepo');
+        const tags = await listImageTags(docker, imageRepo, p.auth as RegistryAuth | undefined);
+        return { imageRepo, tags };
+      }
+      case 'image.listLocal': {
+        const images = await docker.listImages();
+        const out: Array<{ repository: string; tag: string; repoTag: string }> = [];
+        const seen = new Set<string>();
+        for (const img of images) {
+          for (const rt of img.RepoTags || []) {
+            if (!rt || rt.includes('<none>')) continue;
+            if (seen.has(rt)) continue;
+            seen.add(rt);
+            const lastColon = rt.lastIndexOf(':');
+            const lastSlash = rt.lastIndexOf('/');
+            if (lastColon > lastSlash && lastColon > 0) {
+              out.push({
+                repository: rt.slice(0, lastColon),
+                tag: rt.slice(lastColon + 1),
+                repoTag: rt,
+              });
+            } else {
+              out.push({ repository: rt, tag: 'latest', repoTag: `${rt}:latest` });
+            }
+          }
+        }
+        out.sort((a, b) => a.repoTag.localeCompare(b.repoTag));
+        return { images: out };
       }
       case 'inventory.disk': {
         const df = await docker.df();
