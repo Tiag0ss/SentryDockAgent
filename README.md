@@ -122,3 +122,7 @@ Production should use `https://` (and TLS for gRPC) toward the panel — see `DE
 
 - [protocol/PROTOCOL.md](protocol/PROTOCOL.md) — command and event contract
 - **SentryDockServer** — control plane (separate repo)
+
+## License
+
+MIT
