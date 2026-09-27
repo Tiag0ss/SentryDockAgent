@@ -18,18 +18,31 @@ const execFileAsync = promisify(execFile);
 
 const DOCKER_HUB_INDEX = 'https://index.docker.io/v1/';
 
+/** Strip paste artifacts that break Docker Hub Basic auth. */
+function sanitizeCredential(value: string): string {
+  return String(value ?? '')
+    .replace(/^\uFEFF/, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\r\n\0]/g, '')
+    .trim();
+}
+
 /** Normalize registry credentials so Docker Hub does not reject the Authorization header. */
 function normalizeRegistryAuth(auth?: RegistryAuth | null): RegistryAuth | undefined {
   if (!auth) return undefined;
-  const username = String(auth.username ?? '').replace(/\r/g, '').trim();
-  let password = String(auth.password ?? '').replace(/\r/g, '').trim();
+  const username = sanitizeCredential(String(auth.username ?? ''));
+  let password = sanitizeCredential(String(auth.password ?? ''));
   // Accidental paste of "Bearer …" / "Basic …" into the password field.
   if (/^(bearer|basic)\s+/i.test(password)) {
     password = password.replace(/^(bearer|basic)\s+/i, '').trim();
   }
   if (!username || !password) return undefined;
+  // Colon in username breaks Basic auth (user:pass).
+  if (username.includes(':')) {
+    logger.warn('registry username contains ":" — Docker Basic auth will fail');
+  }
 
-  let serveraddress = String(auth.serveraddress ?? '').replace(/\r/g, '').trim();
+  let serveraddress = sanitizeCredential(String(auth.serveraddress ?? ''));
   if (!serveraddress
     || /^(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)(:|\/|$)/i.test(serveraddress)
     || /^https?:\/\/(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)\b/i.test(serveraddress)
@@ -206,14 +219,13 @@ async function listImageTags(
 function asAuth(auth?: RegistryAuth): Docker.AuthConfig | undefined {
   const normalized = normalizeRegistryAuth(auth);
   if (!normalized) return undefined;
-  // Prefer the classic `auth` field (base64 user:pass). Sending username/password
-  // alone has caused Docker Hub "malformed HTTP Authorization header" with some
-  // daemon / credential combinations (PAT, pasted CR, wrong serveraddress).
+  // Only username/password/serveraddress. Do NOT set the legacy `auth` field
+  // (base64 user:pass) alongside them — Docker Engine can build a malformed
+  // Authorization header when both are present.
   return {
     username: normalized.username,
     password: normalized.password,
     serveraddress: normalized.serveraddress || DOCKER_HUB_INDEX,
-    auth: Buffer.from(`${normalized.username}:${normalized.password}`, 'utf8').toString('base64'),
   };
 }
 
@@ -338,10 +350,10 @@ async function getRemoteDigests(
   image: string,
   auth?: RegistryAuth,
 ): Promise<RemoteDigests> {
-  try {
+  const tryDistribution = async (withAuth?: RegistryAuth) => {
     const data = await dialJson(docker, {
       path: `/distribution/${image}/json`,
-      auth,
+      auth: withAuth,
     });
     const descriptor = data.Descriptor as { digest?: string } | undefined;
     const platforms = (data.Platforms as Array<{ digest?: string }> | undefined) || [];
@@ -350,10 +362,25 @@ async function getRemoteDigests(
       ...platforms.map((p) => p.digest),
     ]);
     if (candidates[0]) {
-      return { primary: candidates[0], candidates, source: 'distribution' };
+      return { primary: candidates[0], candidates, source: 'distribution' } as RemoteDigests;
     }
+    return null;
+  };
+
+  try {
+    const hit = await tryDistribution(auth);
+    if (hit) return hit;
   } catch (err) {
-    logger.debug('distribution inspect failed', { err, image });
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.debug('distribution inspect failed', { err: msg, image });
+    if (auth && /malformed HTTP Authorization header/i.test(msg)) {
+      try {
+        const hit = await tryDistribution(undefined);
+        if (hit) return hit;
+      } catch (anonErr) {
+        logger.debug('distribution anonymous retry failed', { err: anonErr, image });
+      }
+    }
   }
 
   try {
@@ -434,26 +461,35 @@ async function pullImage(docker: Docker, image: string, auth?: RegistryAuth): Pr
 
   try {
     await doPull(authconfig);
+    return;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const normalized = normalizeRegistryAuth(auth);
-    // Docker Hub sometimes rejects X-Registry-Auth built from username/password;
-    // retry after `docker login` so the engine uses stored credentials.
-    if (normalized && /malformed HTTP Authorization header/i.test(msg)) {
-      logger.warn('pull auth rejected by registry; retrying via docker login', { image });
+    const isMalformed = /malformed HTTP Authorization header/i.test(msg);
+    if (!normalized || !isMalformed) throw err;
+
+    // 1) docker login then pull with engine-stored creds
+    logger.warn('pull auth rejected by registry; retrying via docker login', { image });
+    try {
+      await dockerLogin(normalized);
+      await doPull(undefined);
+      return;
+    } catch (loginErr) {
+      const loginMsg = loginErr instanceof Error ? loginErr.message : String(loginErr);
+      // 2) Public Hub images: bad/linked secret should not block anonymous pull
+      logger.warn('docker login failed; retrying anonymous pull', { image, err: loginMsg });
       try {
-        await dockerLogin(normalized);
         await doPull(undefined);
         return;
-      } catch (retryErr) {
-        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+      } catch (anonErr) {
+        const anonMsg = anonErr instanceof Error ? anonErr.message : String(anonErr);
         throw new Error(
-          `Registry auth failed for ${image}: ${msg}. Login retry: ${retryMsg}. `
+          `Registry auth failed for ${image}: ${msg}. Login retry: ${loginMsg}. `
+          + `Anonymous pull: ${anonMsg}. `
           + 'Use Docker Hub username (not email) + password/PAT; leave server empty for Docker Hub.',
         );
       }
     }
-    throw err;
   }
 }
 
