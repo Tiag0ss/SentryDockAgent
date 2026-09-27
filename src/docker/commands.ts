@@ -35,6 +35,8 @@ function normalizeRegistryAuth(auth?: RegistryAuth | null): RegistryAuth | undef
     || /^https?:\/\/(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)\b/i.test(serveraddress)
   ) {
     serveraddress = DOCKER_HUB_INDEX;
+  } else if (/^crg\.apkg\.io\b/i.test(serveraddress) || /^https?:\/\/crg\.apkg\.io\b/i.test(serveraddress)) {
+    serveraddress = 'https://crg.apkg.io';
   } else if (!/^https?:\/\//i.test(serveraddress)) {
     serveraddress = `https://${serveraddress}`;
   }
