@@ -17,6 +17,9 @@ RUN pnpm build
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# docker CLI needed for `docker login` fallback on private registry pulls (socket is mounted).
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 # Non-root is impractical when mounting /var/run/docker.sock; run as root by design (Portainer-agent pattern).
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules

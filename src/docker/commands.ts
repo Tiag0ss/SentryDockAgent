@@ -16,10 +16,38 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+const DOCKER_HUB_INDEX = 'https://index.docker.io/v1/';
+
+/** Normalize registry credentials so Docker Hub does not reject the Authorization header. */
+function normalizeRegistryAuth(auth?: RegistryAuth | null): RegistryAuth | undefined {
+  if (!auth) return undefined;
+  const username = String(auth.username ?? '').replace(/\r/g, '').trim();
+  let password = String(auth.password ?? '').replace(/\r/g, '').trim();
+  // Accidental paste of "Bearer …" / "Basic …" into the password field.
+  if (/^(bearer|basic)\s+/i.test(password)) {
+    password = password.replace(/^(bearer|basic)\s+/i, '').trim();
+  }
+  if (!username || !password) return undefined;
+
+  let serveraddress = String(auth.serveraddress ?? '').replace(/\r/g, '').trim();
+  if (!serveraddress
+    || /^(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)(:|\/|$)/i.test(serveraddress)
+    || /^https?:\/\/(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)\b/i.test(serveraddress)
+  ) {
+    serveraddress = DOCKER_HUB_INDEX;
+  } else if (!/^https?:\/\//i.test(serveraddress)) {
+    serveraddress = `https://${serveraddress}`;
+  }
+
+  return { username, password, serveraddress };
+}
+
 async function dockerLogin(auth: RegistryAuth): Promise<void> {
-  const server = auth.serveraddress || 'https://index.docker.io/v1/';
+  const normalized = normalizeRegistryAuth(auth);
+  if (!normalized) throw new Error('registry auth requires username and password');
+  const server = normalized.serveraddress || DOCKER_HUB_INDEX;
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('docker', ['login', server, '-u', auth.username, '--password-stdin'], {
+    const child = spawn('docker', ['login', server, '-u', normalized.username, '--password-stdin'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stderr = '';
@@ -29,7 +57,7 @@ async function dockerLogin(auth: RegistryAuth): Promise<void> {
       if (code === 0) resolve();
       else reject(new Error(stderr.trim() || `docker login failed (${code})`));
     });
-    child.stdin.write(auth.password);
+    child.stdin.write(normalized.password);
     child.stdin.end();
   });
 }
@@ -174,23 +202,23 @@ async function listImageTags(
 }
 
 function asAuth(auth?: RegistryAuth): Docker.AuthConfig | undefined {
-  if (!auth?.username) return undefined;
+  const normalized = normalizeRegistryAuth(auth);
+  if (!normalized) return undefined;
+  // Prefer the classic `auth` field (base64 user:pass). Sending username/password
+  // alone has caused Docker Hub "malformed HTTP Authorization header" with some
+  // daemon / credential combinations (PAT, pasted CR, wrong serveraddress).
   return {
-    username: auth.username,
-    password: auth.password,
-    serveraddress: auth.serveraddress || 'https://index.docker.io/v1/',
+    username: normalized.username,
+    password: normalized.password,
+    serveraddress: normalized.serveraddress || DOCKER_HUB_INDEX,
+    auth: Buffer.from(`${normalized.username}:${normalized.password}`, 'utf8').toString('base64'),
   };
 }
 
 function registryAuthHeader(auth?: RegistryAuth): string | undefined {
-  if (!auth?.username) return undefined;
-  return Buffer.from(
-    JSON.stringify({
-      username: auth.username,
-      password: auth.password,
-      serveraddress: auth.serveraddress || 'https://index.docker.io/v1/',
-    }),
-  ).toString('base64');
+  const cfg = asAuth(auth);
+  if (!cfg) return undefined;
+  return Buffer.from(JSON.stringify(cfg), 'utf8').toString('base64');
 }
 
 /**
@@ -395,12 +423,36 @@ async function getRunningImageDigests(
 
 async function pullImage(docker: Docker, image: string, auth?: RegistryAuth): Promise<void> {
   const authconfig = asAuth(auth);
-  await new Promise<void>((resolve, reject) => {
-    docker.pull(image, authconfig ? { authconfig } : {}, (err, stream) => {
+  const doPull = (cfg?: Docker.AuthConfig) => new Promise<void>((resolve, reject) => {
+    docker.pull(image, cfg ? { authconfig: cfg } : {}, (err, stream) => {
       if (err || !stream) return reject(err || new Error('pull failed'));
       docker.modem.followProgress(stream, (e) => (e ? reject(e) : resolve()));
     });
   });
+
+  try {
+    await doPull(authconfig);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const normalized = normalizeRegistryAuth(auth);
+    // Docker Hub sometimes rejects X-Registry-Auth built from username/password;
+    // retry after `docker login` so the engine uses stored credentials.
+    if (normalized && /malformed HTTP Authorization header/i.test(msg)) {
+      logger.warn('pull auth rejected by registry; retrying via docker login', { image });
+      try {
+        await dockerLogin(normalized);
+        await doPull(undefined);
+        return;
+      } catch (retryErr) {
+        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        throw new Error(
+          `Registry auth failed for ${image}: ${msg}. Login retry: ${retryMsg}. `
+          + 'Use Docker Hub username (not email) + password/PAT; leave server empty for Docker Hub.',
+        );
+      }
+    }
+    throw err;
+  }
 }
 
 /**
