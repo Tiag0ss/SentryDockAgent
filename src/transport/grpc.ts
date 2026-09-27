@@ -1,5 +1,6 @@
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { Envelope } from '../../protocol/types.js';
@@ -18,8 +19,25 @@ type GrpcOpts = {
   onDisconnected?: () => void;
 };
 
+function resolveProtoPath(): string {
+  const candidates = [
+    // Docker / production: protocol copied next to cwd (`/app/protocol`)
+    path.join(process.cwd(), 'protocol', 'agent.proto'),
+    // `pnpm dev` / tsx: src/transport → ../../protocol
+    path.join(__dirname, '../../protocol/agent.proto'),
+    // Compiled: dist/src/transport → ../../../protocol
+    path.join(__dirname, '../../../protocol/agent.proto'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `agent.proto not found (tried: ${candidates.join(', ')})`,
+  );
+}
+
 function loadClient(address: string) {
-  const protoPath = path.join(__dirname, '../../protocol/agent.proto');
+  const protoPath = resolveProtoPath();
   const def = protoLoader.loadSync(protoPath, {
     keepCase: true,
     longs: String,
