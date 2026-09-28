@@ -20,33 +20,44 @@ const DOCKER_HUB_INDEX = 'https://index.docker.io/v1/';
 
 /** Strip paste artifacts that break Docker Hub Basic auth. */
 function sanitizeCredential(value: string): string {
-  return String(value ?? '')
+  let s = String(value ?? '')
     .replace(/^\uFEFF/, '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
     .replace(/[\r\n\0]/g, '')
     .trim();
+  // Accidental quotes from copy/paste into the secrets form.
+  if (
+    (s.startsWith('"') && s.endsWith('"') && s.length >= 2)
+    || (s.startsWith("'") && s.endsWith("'") && s.length >= 2)
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
 }
 
 /** Normalize registry credentials so Docker Hub does not reject the Authorization header. */
 function normalizeRegistryAuth(auth?: RegistryAuth | null): RegistryAuth | undefined {
   if (!auth) return undefined;
-  const username = sanitizeCredential(String(auth.username ?? ''));
+  let username = sanitizeCredential(String(auth.username ?? ''));
   let password = sanitizeCredential(String(auth.password ?? ''));
   // Accidental paste of "Bearer …" / "Basic …" into the password field.
   if (/^(bearer|basic)\s+/i.test(password)) {
     password = password.replace(/^(bearer|basic)\s+/i, '').trim();
   }
   if (!username || !password) return undefined;
-  // Colon in username breaks Basic auth (user:pass).
   if (username.includes(':')) {
-    logger.warn('registry username contains ":" — Docker Basic auth will fail');
+    logger.warn('registry username contains ":" — Docker Basic auth will fail', { username });
   }
 
   let serveraddress = sanitizeCredential(String(auth.serveraddress ?? ''));
-  if (!serveraddress
+  const isHub = !serveraddress
     || /^(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)(:|\/|$)/i.test(serveraddress)
-    || /^https?:\/\/(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)\b/i.test(serveraddress)
-  ) {
+    || /^https?:\/\/(docker\.io|index\.docker\.io|registry-1\.docker\.io|hub\.docker\.com)\b/i.test(serveraddress);
+
+  if (isHub) {
+    // Hub usernames are lowercase; mixed case (e.g. TiagOss) breaks login/pull.
+    username = username.toLowerCase();
+    // CLI login expects "docker.io"; the index URL is for AuthConfig/API.
     serveraddress = DOCKER_HUB_INDEX;
   } else if (/^crg\.apkg\.io\b/i.test(serveraddress) || /^https?:\/\/crg\.apkg\.io\b/i.test(serveraddress)) {
     serveraddress = 'https://crg.apkg.io';
@@ -60,7 +71,17 @@ function normalizeRegistryAuth(auth?: RegistryAuth | null): RegistryAuth | undef
 async function dockerLogin(auth: RegistryAuth): Promise<void> {
   const normalized = normalizeRegistryAuth(auth);
   if (!normalized) throw new Error('registry auth requires username and password');
-  const server = normalized.serveraddress || DOCKER_HUB_INDEX;
+  const isHub = normalized.serveraddress === DOCKER_HUB_INDEX
+    || /^https?:\/\/index\.docker\.io\b/i.test(normalized.serveraddress || '');
+  // Hub CLI login: "docker.io" (not the index URL) — avoids malformed Authorization on some daemons.
+  const server = isHub ? 'docker.io' : (normalized.serveraddress || DOCKER_HUB_INDEX);
+  logger.info('docker login', {
+    server,
+    username: normalized.username,
+    passwordLen: normalized.password.length,
+    passwordLooksLikePat: /^dckr_pat_/i.test(normalized.password),
+    usernameLooksLikeEmail: normalized.username.includes('@'),
+  });
   await new Promise<void>((resolve, reject) => {
     const child = spawn('docker', ['login', server, '-u', normalized.username, '--password-stdin'], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -72,7 +93,8 @@ async function dockerLogin(auth: RegistryAuth): Promise<void> {
       if (code === 0) resolve();
       else reject(new Error(stderr.trim() || `docker login failed (${code})`));
     });
-    child.stdin.write(normalized.password);
+    // No trailing newline — same as `printf '%s'`.
+    child.stdin.write(Buffer.from(normalized.password, 'utf8'));
     child.stdin.end();
   });
 }
@@ -330,7 +352,13 @@ function dialJson(
   });
 }
 
-type RemoteDigests = { primary: string; candidates: string[]; source: string };
+type RemoteDigests = {
+  primary: string;
+  candidates: string[];
+  source: string;
+  /** False when registry was reached without credentials (or auth failed and anonymous worked). */
+  usedAuth: boolean;
+};
 
 function uniqueDigests(values: Array<string | null | undefined>): string[] {
   const out: string[] = [];
@@ -343,7 +371,7 @@ function uniqueDigests(values: Array<string | null | undefined>): string[] {
 
 /**
  * Resolve remote image digests without relying on a local pull.
- * Returns the index/manifest digest plus platform candidates (multi-arch safe).
+ * Same path as Images → Test access (`image.digest`).
  */
 async function getRemoteDigests(
   docker: Docker,
@@ -362,25 +390,31 @@ async function getRemoteDigests(
       ...platforms.map((p) => p.digest),
     ]);
     if (candidates[0]) {
-      return { primary: candidates[0], candidates, source: 'distribution' } as RemoteDigests;
+      return { primary: candidates[0], candidates } as { primary: string; candidates: string[] };
     }
     return null;
   };
 
-  try {
-    const hit = await tryDistribution(auth);
-    if (hit) return hit;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.debug('distribution inspect failed', { err: msg, image });
-    if (auth && /malformed HTTP Authorization header/i.test(msg)) {
-      try {
-        const hit = await tryDistribution(undefined);
-        if (hit) return hit;
-      } catch (anonErr) {
-        logger.debug('distribution anonymous retry failed', { err: anonErr, image });
-      }
+  if (auth) {
+    try {
+      const hit = await tryDistribution(auth);
+      if (hit) return { ...hit, source: 'distribution', usedAuth: true };
+    } catch (err) {
+      logger.debug('distribution inspect with auth failed', {
+        err: err instanceof Error ? err.message : String(err),
+        image,
+      });
     }
+  }
+
+  try {
+    const hit = await tryDistribution(undefined);
+    if (hit) return { ...hit, source: 'distribution', usedAuth: false };
+  } catch (err) {
+    logger.debug('distribution inspect anonymous failed', {
+      err: err instanceof Error ? err.message : String(err),
+      image,
+    });
   }
 
   try {
@@ -402,20 +436,20 @@ async function getRemoteDigests(
       ...(j.manifests || []).map((m) => m.digest),
     ]);
     if (candidates[0]) {
-      return { primary: candidates[0], candidates, source: 'manifest' };
+      return { primary: candidates[0], candidates, source: 'manifest', usedAuth: false };
     }
   } catch (err) {
     logger.debug('manifest inspect failed', { err, image });
   }
 
-  // Last resort: local RepoDigests for the tag (may be stale)
+  // Last resort: local RepoDigests for the tag (may be stale) — not a real registry probe.
   try {
     const insp = await docker.getImage(image).inspect();
     const local = digestsFromRepoDigests(insp.RepoDigests);
     const id = normalizeDigest(insp.Id);
     const candidates = uniqueDigests([...local, id]);
     if (candidates[0]) {
-      return { primary: candidates[0], candidates, source: 'local-repodigest' };
+      return { primary: candidates[0], candidates, source: 'local-repodigest', usedAuth: false };
     }
   } catch {
     /* ignore */
@@ -459,45 +493,34 @@ async function pullImage(docker: Docker, image: string, auth?: RegistryAuth): Pr
     });
   });
 
-  try {
-    await doPull(authconfig);
-    return;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const normalized = normalizeRegistryAuth(auth);
-    const isMalformed = /malformed HTTP Authorization header/i.test(msg);
-    if (!normalized || !isMalformed) throw err;
-
-    // 1) docker login then pull with engine-stored creds
-    logger.warn('pull auth rejected by registry; retrying via docker login', { image });
+  // Same credential shape as Images → Test access (distribution AuthConfig).
+  if (authconfig) {
     try {
-      await dockerLogin(normalized);
-      await doPull(undefined);
+      await doPull(authconfig);
       return;
-    } catch (loginErr) {
-      const loginMsg = loginErr instanceof Error ? loginErr.message : String(loginErr);
-      // 2) Public Hub images: bad/linked secret should not block anonymous pull
-      logger.warn('docker login failed; retrying anonymous pull', { image, err: loginMsg });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn('pull with AuthConfig failed; trying docker login + pull', { image, err: msg });
       try {
+        await dockerLogin(auth!);
         await doPull(undefined);
         return;
-      } catch (anonErr) {
-        const anonMsg = anonErr instanceof Error ? anonErr.message : String(anonErr);
+      } catch (loginErr) {
+        const loginMsg = loginErr instanceof Error ? loginErr.message : String(loginErr);
         throw new Error(
-          `Registry auth failed for ${image}: ${msg}. Login retry: ${loginMsg}. `
-          + `Anonymous pull: ${anonMsg}. `
-          + 'Use Docker Hub username (not email) + password/PAT; leave server empty for Docker Hub.',
+          `Registry pull failed for ${image}: ${msg}. docker login retry: ${loginMsg}. `
+          + 'Use Docker Hub username (lowercase) + personal access token; leave server empty.',
         );
       }
     }
   }
+
+  await doPull(undefined);
 }
 
 /**
- * Authoritative update check for Docker Desktop / containerd image store:
- * RepoDigests often equal the image config id (not the registry index digest),
- * so comparing them to the remote manifest digest always looks like an update.
- * Instead: refresh the tag with a pull and compare the running image Id to the tag Id.
+ * Update check — same registry path as Images → Test access (`image.digest`).
+ * Compares remote digests (index + platform) to the running image; no docker pull/login.
  */
 async function checkImageUpdate(
   docker: Docker,
@@ -517,7 +540,6 @@ async function checkImageUpdate(
   const running = await getRunningImageDigests(docker, containerId);
   const beforeId = running.imageId;
 
-  // Never pull by raw image id — recover the name:tag from the running container.
   const imageRef = await resolveImageRef(docker, image, [running.configImage]);
   if (!imageRef || isImageIdRef(imageRef)) {
     throw new Error(
@@ -525,30 +547,40 @@ async function checkImageUpdate(
     );
   }
 
-  await pullImage(docker, imageRef, auth);
+  const remote = await getRemoteDigests(docker, imageRef, auth);
+  if (remote.source === 'local-repodigest') {
+    throw new Error(
+      `Cannot reach registry for ${imageRef} (fell back to local only). `
+      + 'Check registry credentials on the catalog image, or run Images → Test access.',
+    );
+  }
 
-  const latest = await docker.getImage(imageRef).inspect();
-  const latestId = String(latest.Id || '');
-  const repoDigests = digestsFromRepoDigests(latest.RepoDigests);
-
-  const updateAvailable = Boolean(beforeId && latestId && beforeId !== latestId);
+  // Include image id: on containerd it often matches a platform digest from the registry.
+  const localDigests = uniqueDigests([
+    ...digestsFromRepoDigests(running.repoDigests),
+    ...running.digests,
+    beforeId,
+  ]);
+  const matched = remote.candidates.some((d) => localDigests.includes(d));
+  const updateAvailable = Boolean(remote.primary) && !matched;
 
   logger.info('image.checkUpdate', {
     image: imageRef,
-    requestedImage: image,
-    containerId,
-    beforeId,
-    latestId,
+    mode: 'digest-compare',
+    remoteDigest: remote.primary,
+    remoteSource: remote.source,
+    remoteCandidates: remote.candidates.length,
+    localDigests,
     updateAvailable,
-    repoDigests,
+    usedAuth: remote.usedAuth,
   });
 
   return {
     updateAvailable,
-    remoteDigest: latestId,
-    remoteDigests: repoDigests.length ? repoDigests : [latestId],
-    remoteSource: 'pull-compare',
-    localDigests: beforeId ? [beforeId] : [],
+    remoteDigest: remote.primary,
+    remoteDigests: remote.candidates,
+    remoteSource: remote.source,
+    localDigests,
     imageId: beforeId,
     configImage: running.configImage,
     image: imageRef,
