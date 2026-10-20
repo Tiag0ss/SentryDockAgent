@@ -1,5 +1,8 @@
 import dotenv from 'dotenv';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { createDocker } from './docker/client.js';
 import { handleCommand } from './docker/commands.js';
 import { connectWs } from './transport/ws.js';
@@ -10,7 +13,26 @@ import { PROTOCOL_VERSION } from '../protocol/types.js';
 
 dotenv.config();
 
-const AGENT_VERSION = process.env.AGENT_VERSION || '0.1.0';
+function readPackageVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      path.join(process.cwd(), 'package.json'),
+      path.join(here, '../../package.json'),
+      path.join(here, '../../../package.json'),
+    ];
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate)) continue;
+      const pkg = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { version?: string };
+      if (pkg.version) return String(pkg.version);
+    }
+  } catch {
+    /* ignore */
+  }
+  return '0.0.0';
+}
+
+const AGENT_VERSION = process.env.AGENT_VERSION || readPackageVersion();
 const transport = (process.env.AGENT_TRANSPORT || 'ws') as 'ws' | 'grpc';
 const url = process.env.SENTRYDOCK_URL || 'http://localhost:3000';
 const token = process.env.AGENT_TOKEN || '';
