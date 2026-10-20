@@ -5,7 +5,7 @@ import { handleCommand } from './docker/commands.js';
 import { connectWs } from './transport/ws.js';
 import { connectGrpc } from './transport/grpc.js';
 import logger from './logger.js';
-import type { Envelope } from '../protocol/types.js';
+import type { AgentConfigPayload, Envelope, MetricsBatchPayload } from '../protocol/types.js';
 import { PROTOCOL_VERSION } from '../protocol/types.js';
 
 dotenv.config();
@@ -16,6 +16,10 @@ const url = process.env.SENTRYDOCK_URL || 'http://localhost:3000';
 const token = process.env.AGENT_TOKEN || '';
 /** Display label only — authentication is by AGENT_TOKEN. */
 const agentName = process.env.AGENT_NAME || os.hostname();
+
+const DEFAULT_METRICS_INTERVAL_SEC = 30;
+const MIN_METRICS_INTERVAL_SEC = 10;
+const MAX_METRICS_INTERVAL_SEC = 300;
 
 if (!token) {
   logger.error('AGENT_TOKEN is required');
@@ -28,8 +32,87 @@ const docker = createDocker();
 let sendFn: ((env: Envelope) => void) | null = null;
 let heartbeatsStarted = false;
 
+let metricsIntervalSec = DEFAULT_METRICS_INTERVAL_SEC;
+let metricsTimer: ReturnType<typeof setInterval> | null = null;
+let metricsBusy = false;
+
+function clampInterval(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_METRICS_INTERVAL_SEC;
+  return Math.min(MAX_METRICS_INTERVAL_SEC, Math.max(MIN_METRICS_INTERVAL_SEC, Math.round(n)));
+}
+
+function applyAgentConfig(payload: unknown): AgentConfigPayload {
+  const p = (payload || {}) as Partial<AgentConfigPayload>;
+  metricsIntervalSec = clampInterval(Number(p.metricsIntervalSec));
+  const retention = Number(p.metricsRetentionHours);
+  restartMetricsLoop();
+  logger.info('agent.config applied', {
+    metricsIntervalSec,
+    metricsRetentionHours: Number.isFinite(retention) ? retention : undefined,
+  });
+  return {
+    metricsIntervalSec,
+    metricsRetentionHours: Number.isFinite(retention) ? Math.round(retention) : 24,
+  };
+}
+
+async function sampleAndSendMetrics() {
+  if (!sendFn || metricsBusy) return;
+  metricsBusy = true;
+  try {
+    const list = await handleCommand(docker, 'docker.list', { all: true, withStats: true }) as Array<Record<string, unknown>>;
+    if (!Array.isArray(list)) return;
+    const containers: MetricsBatchPayload['containers'] = list.map((c) => {
+      const stats = (c.stats && typeof c.stats === 'object') ? c.stats as Record<string, unknown> : null;
+      return {
+        id: String(c.id || ''),
+        name: String(c.name || c.id || ''),
+        image: c.image != null ? String(c.image) : undefined,
+        state: c.state != null ? String(c.state) : undefined,
+        status: c.status != null ? String(c.status) : undefined,
+        cpuPercent: stats?.cpuPercent != null ? Number(stats.cpuPercent) : null,
+        memoryUsageBytes: stats?.memoryUsageBytes != null ? Number(stats.memoryUsageBytes) : null,
+        memoryLimitBytes: stats?.memoryLimitBytes != null ? Number(stats.memoryLimitBytes) : null,
+        sizeRwBytes: stats?.sizeRwBytes != null ? Number(stats.sizeRwBytes) : null,
+        sizeRootFsBytes: stats?.sizeRootFsBytes != null ? Number(stats.sizeRootFsBytes) : null,
+      };
+    }).filter((c) => c.id);
+
+    sendFn({
+      requestId: `metrics-${Date.now()}`,
+      type: 'metrics.batch',
+      payload: { ts: Date.now(), containers } satisfies MetricsBatchPayload,
+    });
+  } catch (err) {
+    logger.warn('metrics sample failed', { err: err instanceof Error ? err.message : String(err) });
+  } finally {
+    metricsBusy = false;
+  }
+}
+
+function restartMetricsLoop() {
+  if (metricsTimer) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+  metricsTimer = setInterval(() => {
+    void sampleAndSendMetrics();
+  }, metricsIntervalSec * 1000);
+  // Sample soon after (re)config / connect
+  void sampleAndSendMetrics();
+}
+
 async function onCommand(env: Envelope, reply: (env: Envelope) => void) {
   try {
+    if (env.type === 'agent.config') {
+      const data = applyAgentConfig(env.payload);
+      reply({
+        requestId: env.requestId,
+        type: 'command.result',
+        payload: { requestId: env.requestId, ok: true, data },
+      });
+      return;
+    }
     const data = await handleCommand(docker, env.type, env.payload);
     reply({
       requestId: env.requestId,
@@ -51,6 +134,8 @@ async function onCommand(env: Envelope, reply: (env: Envelope) => void) {
 
 function onReady(send: (e: Envelope) => void) {
   sendFn = send;
+  if (!metricsTimer) restartMetricsLoop();
+
   if (heartbeatsStarted) return;
   heartbeatsStarted = true;
 

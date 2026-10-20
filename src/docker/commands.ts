@@ -587,6 +587,66 @@ async function checkImageUpdate(
   };
 }
 
+function cpuPercentFromStats(stats: {
+  cpu_stats?: { cpu_usage?: { total_usage?: number; percpu_usage?: number[] }; system_cpu_usage?: number; online_cpus?: number };
+  precpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number };
+}): number | null {
+  const cpu = stats.cpu_stats;
+  const pre = stats.precpu_stats;
+  if (!cpu?.cpu_usage || !pre?.cpu_usage) return null;
+  const cpuDelta = Number(cpu.cpu_usage.total_usage || 0) - Number(pre.cpu_usage.total_usage || 0);
+  const systemDelta = Number(cpu.system_cpu_usage || 0) - Number(pre.system_cpu_usage || 0);
+  if (cpuDelta <= 0 || systemDelta <= 0) return 0;
+  const online = Number(cpu.online_cpus)
+    || (Array.isArray(cpu.cpu_usage.percpu_usage) ? cpu.cpu_usage.percpu_usage.length : 1)
+    || 1;
+  return Math.round((cpuDelta / systemDelta) * online * 1000) / 10;
+}
+
+async function containerStatsSnapshot(
+  docker: Docker,
+  id: string,
+): Promise<{
+  cpuPercent: number | null;
+  memoryUsageBytes: number | null;
+  memoryLimitBytes: number | null;
+  sizeRwBytes: number | null;
+  sizeRootFsBytes: number | null;
+}> {
+  const container = docker.getContainer(id);
+  let cpuPercent: number | null = null;
+  let memoryUsageBytes: number | null = null;
+  let memoryLimitBytes: number | null = null;
+  try {
+    const stats = await container.stats({ stream: false }) as {
+      cpu_stats?: { cpu_usage?: { total_usage?: number; percpu_usage?: number[] }; system_cpu_usage?: number; online_cpus?: number };
+      precpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number };
+      memory_stats?: { usage?: number; limit?: number };
+    };
+    cpuPercent = cpuPercentFromStats(stats);
+    memoryUsageBytes = stats.memory_stats?.usage != null ? Number(stats.memory_stats.usage) : null;
+    memoryLimitBytes = stats.memory_stats?.limit != null ? Number(stats.memory_stats.limit) : null;
+  } catch (err) {
+    logger.debug('container stats failed', { id, err: err instanceof Error ? err.message : String(err) });
+  }
+
+  let sizeRwBytes: number | null = null;
+  let sizeRootFsBytes: number | null = null;
+  try {
+    // dockerode typings omit `size`; Docker Engine accepts it and returns SizeRw/SizeRootFs.
+    const insp = await container.inspect({ size: true } as Record<string, unknown>) as {
+      SizeRw?: number;
+      SizeRootFs?: number;
+    };
+    sizeRwBytes = insp.SizeRw != null ? Number(insp.SizeRw) : null;
+    sizeRootFsBytes = insp.SizeRootFs != null ? Number(insp.SizeRootFs) : null;
+  } catch {
+    /* size optional */
+  }
+
+  return { cpuPercent, memoryUsageBytes, memoryLimitBytes, sizeRwBytes, sizeRootFsBytes };
+}
+
 export async function handleCommand(
   docker: Docker,
   type: string,
@@ -608,7 +668,9 @@ export async function handleCommand(
           if (short) tagById.set(short, tag);
           tagById.set(`sha256:${short}`, tag);
         }
-        return containers.map((c) => {
+        const withStats = Boolean(p.withStats);
+        const rows = [];
+        for (const c of containers) {
           const labels = c.Labels || {};
           const name = (c.Names?.[0] || c.Id).replace(/^\//, '');
           const listed = c.Image || '';
@@ -622,7 +684,7 @@ export async function handleCommand(
               || tagById.get(listed.replace(/^sha256:/, ''))
               || listed;
           }
-          return {
+          const row: Record<string, unknown> = {
             id: c.Id,
             name,
             names: c.Names,
@@ -634,11 +696,61 @@ export async function handleCommand(
             composeProject: labels['com.docker.compose.project'] || undefined,
             composeService: labels['com.docker.compose.service'] || undefined,
           };
-        });
+          if (withStats) {
+            const running = String(c.State || '').toLowerCase() === 'running';
+            if (running) {
+              row.stats = await containerStatsSnapshot(docker, c.Id);
+            } else {
+              // Still try size for stopped containers (no live CPU/RAM).
+              try {
+                const insp = await docker.getContainer(c.Id).inspect({ size: true } as Record<string, unknown>) as {
+                  SizeRw?: number;
+                  SizeRootFs?: number;
+                };
+                row.stats = {
+                  cpuPercent: null,
+                  memoryUsageBytes: null,
+                  memoryLimitBytes: null,
+                  sizeRwBytes: insp.SizeRw != null ? Number(insp.SizeRw) : null,
+                  sizeRootFsBytes: insp.SizeRootFs != null ? Number(insp.SizeRootFs) : null,
+                };
+              } catch {
+                row.stats = null;
+              }
+            }
+          }
+          rows.push(row);
+        }
+        return rows;
       }
       case 'docker.inspect': {
         const id = String(p.id);
         return docker.getContainer(id).inspect();
+      }
+      case 'docker.stats': {
+        const id = String(p.id || '');
+        if (!id) throw new Error('docker.stats requires id');
+        return containerStatsSnapshot(docker, id);
+      }
+      case 'docker.start': {
+        const id = String(p.id || '');
+        if (!id) throw new Error('docker.start requires id');
+        await docker.getContainer(id).start();
+        return { ok: true, id, action: 'start' };
+      }
+      case 'docker.stop': {
+        const id = String(p.id || '');
+        if (!id) throw new Error('docker.stop requires id');
+        const t = Number(p.timeoutSec ?? 10);
+        await docker.getContainer(id).stop({ t: Number.isFinite(t) ? t : 10 });
+        return { ok: true, id, action: 'stop' };
+      }
+      case 'docker.restart': {
+        const id = String(p.id || '');
+        if (!id) throw new Error('docker.restart requires id');
+        const t = Number(p.timeoutSec ?? 10);
+        await docker.getContainer(id).restart({ t: Number.isFinite(t) ? t : 10 });
+        return { ok: true, id, action: 'restart' };
       }
       case 'docker.pull': {
         const image = String(p.image);

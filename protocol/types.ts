@@ -8,6 +8,10 @@ export type AgentTransport = 'ws' | 'grpc';
 export type CommandType =
   | 'docker.list'
   | 'docker.inspect'
+  | 'docker.stats'
+  | 'docker.start'
+  | 'docker.stop'
+  | 'docker.restart'
   | 'docker.pull'
   | 'docker.recreate'
   | 'docker.compose'
@@ -18,14 +22,37 @@ export type CommandType =
   | 'image.checkUpdate'
   | 'image.listTags'
   | 'image.listLocal'
-  | 'inventory.disk';
+  | 'inventory.disk'
+  | 'agent.config';
 
 export type EventType =
   | 'hello'
   | 'heartbeat'
   | 'command.result'
   | 'stream.log'
-  | 'inventory';
+  | 'inventory'
+  | 'metrics.batch';
+
+export interface AgentConfigPayload {
+  metricsIntervalSec: number;
+  metricsRetentionHours: number;
+}
+
+export interface MetricsBatchPayload {
+  ts: number;
+  containers: Array<{
+    id: string;
+    name: string;
+    image?: string;
+    state?: string;
+    status?: string;
+    cpuPercent?: number | null;
+    memoryUsageBytes?: number | null;
+    memoryLimitBytes?: number | null;
+    sizeRwBytes?: number | null;
+    sizeRootFsBytes?: number | null;
+  }>;
+}
 
 export interface Envelope<T = unknown> {
   requestId: string;

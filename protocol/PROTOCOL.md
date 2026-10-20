@@ -21,8 +21,12 @@ Outbound connection from agent with token:
 
 | type | payload |
 |------|---------|
-| `docker.list` | `{ all?: boolean }` |
+| `docker.list` | `{ all?: boolean, withStats?: boolean }` → containers (+ optional cpu/mem/size) |
 | `docker.inspect` | `{ id: string }` |
+| `docker.stats` | `{ id: string }` → `{ cpuPercent, memoryUsageBytes, memoryLimitBytes, sizeRwBytes?, sizeRootFsBytes? }` |
+| `docker.start` | `{ id: string }` |
+| `docker.stop` | `{ id: string, timeoutSec?: number }` |
+| `docker.restart` | `{ id: string, timeoutSec?: number }` |
 | `docker.pull` | `{ image: string, auth?: { username, password, serveraddress } }` |
 | `docker.recreate` | `{ id: string, image?: string, desiredDigest?: string }` |
 | `docker.compose` | `{ action: "up"\|"down", projectPath: string, image?: string }` — `projectPath` must exist (file or dir with compose.yaml); `~` expanded |
@@ -34,6 +38,7 @@ Outbound connection from agent with token:
 | `image.listTags` | `{ imageRepo, auth? }` → `{ tags: string[] }` |
 | `image.listLocal` | `{}` → `{ images: [{ repository, tag, repoTag }] }` |
 | `inventory.disk` | `{}` |
+| `agent.config` | `{ metricsIntervalSec, metricsRetentionHours }` — sampling interval; retention applied on server |
 
 ## Events (agent → server)
 
@@ -44,6 +49,7 @@ Outbound connection from agent with token:
 | `command.result` | `{ requestId, ok, data?, error? }` |
 | `stream.log` | `{ requestId, line }` |
 | `inventory` | `{ diskUsedBytes?, diskTotalBytes?, danglingImages? }` |
+| `metrics.batch` | `{ ts, containers: [{ id, name, image, state, status, cpuPercent, memoryUsageBytes, memoryLimitBytes, sizeRwBytes, sizeRootFsBytes }] }` |
 
 ## Envelope
 
