@@ -1,60 +1,56 @@
+[![Docker Hub](https://img.shields.io/docker/pulls/tiag0ss/sentrydock-agent?label=Docker%20Pulls&logo=docker)](https://hub.docker.com/r/tiag0ss/sentrydock-agent)
+[![Docker Image](https://img.shields.io/badge/Docker%20Hub-tiag0ss%2Fsentrydock--agent-blue?logo=docker)](https://hub.docker.com/r/tiag0ss/sentrydock-agent)
+
 # SentryDockAgent
 
-**SentryDockAgent** is the worker that runs on each Docker host. It connects **outbound** to **SentryDockServer**, keeps a long-lived session, and executes whatever the control plane asks against the local Docker Engine.
+Per-host worker for **SentryDock**. It connects **outbound** to [SentryDockServer](https://github.com/Tiag0ss/sentrydockserver), keeps a long-lived session, and runs Docker / Compose commands against the local engine.
 
-You do not open inbound ports on the agent host. The agent reaches the panel (WebSocket or gRPC); the panel never SSHs in.
+You do **not** open inbound ports on the agent host. The agent reaches the panel (WebSocket or gRPC); the panel never SSHs in.
 
----
+This project is **functional** and usable day-to-day, but still in an **early stage** — expect rough edges. Please report bugs and ideas on GitHub.
 
-## What this project does
+## Features
 
-### Execute Docker work for the control plane
+- 🐳 **Local Docker execution** — Inspect containers, pull images, recreate (incl. digest-pinned rollback), list tags, apply / tear down Compose, read disk inventory
+- 📡 **Outbound-only** — No public IP required; authenticates with an agent token from the panel
+- 🔌 **WebSocket or gRPC** — Same message contract; reconnects with backoff
+- 💓 **Heartbeats & inventory** — Disk usage, dangling images, container state for the dashboard
+- 📈 **Metrics samples** — CPU / memory batches for the server dashboard (interval / retention from the panel)
+- 📁 **Catalog Compose on disk** — Writes panel Compose projects under a persistent directory (named volume in Docker)
 
-When a flow on the server needs to inspect containers, check a registry digest, pull an image, recreate a container (including digest-pinned rollback), list tags, apply or tear down a Compose project, or read disk inventory, it sends a command to this agent. The agent talks to Docker via the engine socket and returns structured results (and optional log streams).
+Command surface: [protocol/PROTOCOL.md](protocol/PROTOCOL.md) (`docker.*`, `image.*`, `inventory.*`, metrics).
 
-Supported command surface is defined in [protocol/PROTOCOL.md](protocol/PROTOCOL.md) (`docker.*`, `image.*`, `inventory.*`).
-
-### Stay online without a public IP
-
-- Authenticates with an **agent token** issued in the panel (the name is only a label)
-- Transports: **WebSocket (Socket.IO)** or **gRPC** — same message contract
-- Reconnects with backoff if the link drops
-- Sends heartbeats and periodic **inventory** (disk usage, dangling images) so the dashboard can warn you
-
-### Isolate blast radius per host
-
-Each agent only controls the Docker Engine it can reach (usually the host socket). Compromise of one token affects that host; other agents and the panel stay separate. Treat the token like a root Docker credential.
-
-### How it fits SentryDock
+## How it fits SentryDock
 
 | Piece | Responsibility |
 |-------|----------------|
-| **SentryDockServer** | UI, users, flows, scheduling, secrets, run history |
-| **SentryDockAgent** (this repo) | Local Docker execution + inventory reporting |
+| **[SentryDockServer](https://github.com/Tiag0ss/sentrydockserver)** | UI, users, flows, scheduling, secrets, run history |
+| **SentryDockAgent** (this repo) | Local Docker execution + inventory / metrics |
 
 Without agents, the panel has nothing to drive. Without the panel, the agent has no jobs to run.
 
----
+Treat `AGENT_TOKEN` like a root Docker credential: one token = one host’s engine.
 
-## Quick start
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Runtime | Node.js, TypeScript |
+| Docker | Engine socket (`dockerode`) |
+| Transports | Socket.IO client or gRPC |
+| Container | Alpine-based Node.js image — [`tiag0ss/sentrydock-agent`](https://hub.docker.com/r/tiag0ss/sentrydock-agent) |
+
+## Local Development
 
 1. In **SentryDockServer**: **Agents → Create** → copy the token.  
 2. Here:
 
 ```bash
+git clone https://github.com/Tiag0ss/SentryDockAgent.git
+cd SentryDockAgent
 cp .env.example .env
 # AGENT_TOKEN=...
-# SENTRYDOCK_URL=https://panel.example   # or http://host.docker.internal:3000 locally
-# AGENT_TRANSPORT=ws                     # or grpc (+ SENTRYDOCK_GRPC_URL)
-docker compose up -d --build
-```
-
-Compose mounts `/var/run/docker.sock` and uses `host.docker.internal` to reach a panel on the host.
-
-### Local development
-
-```bash
-cp .env.example .env
+# SENTRYDOCK_URL=http://localhost:3000
 pnpm install
 pnpm dev
 ```
@@ -69,21 +65,50 @@ AGENT_TRANSPORT=grpc \
 pnpm dev
 ```
 
-For WebSocket, set `AGENT_TRANSPORT=ws` (no gRPC URL required).
+```bash
+pnpm lint && pnpm typecheck && pnpm test
+pnpm build && pnpm start
+```
 
----
+## Quick Start (Docker)
 
-## Configuration
+### From Docker Hub
 
-| Variable | Default | Notes |
-|----------|---------|--------|
-| `AGENT_TOKEN` | — | **Required** (from the panel) |
-| `AGENT_NAME` | `agent-1` | Display label only |
-| `AGENT_TRANSPORT` | `ws` | `ws` or `grpc` |
-| `SENTRYDOCK_URL` | — | Panel HTTP(S) URL |
-| `SENTRYDOCK_GRPC_URL` | — | `host:port` when using gRPC |
-| `DOCKER_SOCKET` | auto | Force socket path; unset = auto-detect |
-| `SENTRYDOCK_COMPOSE_DIR` | `~/.sentrydock/compose` | Directory for catalog Compose files (`docker.compose.apply`). **Must be on a volume** when the agent runs in Docker, or updates wipe the files. The bundled `docker-compose.yml` mounts a named volume at `/var/lib/sentrydock/compose`. |
+```bash
+docker run -d \
+  --name sentrydock-agent \
+  -e SENTRYDOCK_URL=https://panel.example \
+  -e AGENT_TOKEN=your-agent-token \
+  -e AGENT_NAME=host-1 \
+  -e AGENT_TRANSPORT=ws \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v sentrydock_compose:/var/lib/sentrydock/compose \
+  tiag0ss/sentrydock-agent:latest
+```
+
+For a panel on the same Docker host, use `http://host.docker.internal:3000` and add `--add-host=host.docker.internal:host-gateway` (Linux).
+
+### Build locally
+
+```bash
+cp .env.example .env
+# set AGENT_TOKEN (+ SENTRYDOCK_URL)
+docker compose up -d --build
+```
+
+Compose mounts `/var/run/docker.sock` and a named volume for catalog Compose files.
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AGENT_TOKEN` | **Yes** | — | Token from the panel (**Agents → Create**) |
+| `AGENT_NAME` | No | `agent-1` | Display label only |
+| `AGENT_TRANSPORT` | No | `ws` | `ws` or `grpc` |
+| `SENTRYDOCK_URL` | **Yes** | — | Panel HTTP(S) URL |
+| `SENTRYDOCK_GRPC_URL` | If gRPC | — | `host:port` when using gRPC |
+| `DOCKER_SOCKET` | No | auto | Force socket path; unset = auto-detect |
+| `SENTRYDOCK_COMPOSE_DIR` | No | `~/.sentrydock/compose` | Catalog Compose files. **Must be a volume** in Docker. |
 
 ### Docker socket
 
@@ -93,35 +118,30 @@ In a container the process runs as root on purpose (socket access), similar to a
 
 ### Catalog Compose persistence
 
-Projects deployed from the panel are written under `SENTRYDOCK_COMPOSE_DIR/<project>/docker-compose.yml`. The panel database remains the source of truth (redeploy rewrites the files), but without a volume a container recreate still loses local files until the next deploy and can break path-based `compose up` in flows. Keep the named volume from `docker-compose.yml` (or bind-mount a host directory). Do not use `docker compose down -v` unless you intend to drop that data.
+Projects from the panel are written under `SENTRYDOCK_COMPOSE_DIR/<project>/docker-compose.yml`. Keep the named volume from `docker-compose.yml` (or a bind-mount). Do not use `docker compose down -v` unless you intend to drop that data.
 
-### CI / CD
-
-Same split as Synapse / Myelin:
+## CI / CD
 
 | System | File | When | What |
 |--------|------|------|------|
-| **GitHub Actions** | `.github/workflows/ci.yml` | push/PR to `main`/`master` | `pnpm install`, lint, test, typecheck |
-| **Woodpecker** | `.woodpecker.yaml` | tag `V*` (e.g. `V0.1.0`) | same checks, then build/push `tiag0ss/sentrydock-agent` (`latest` + version) |
+| **GitHub Actions** | `.github/workflows/ci.yml` | push/PR to `main`/`master` | install, lint, test, typecheck |
+| **Woodpecker** | `.woodpecker.yaml` | tag `V*` (e.g. `V0.2.3`) | checks, then build/push `tiag0ss/sentrydock-agent` (`latest` + version) |
 
-Woodpecker needs secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`.
+## Updating
 
-### Scripts
-
-| Command | Description |
-|---------|-------------|
-| `pnpm dev` | Watch mode |
-| `pnpm build` / `pnpm start` | Production build / run |
-| `pnpm lint` / `pnpm typecheck` / `pnpm test` | Quality gates |
+```bash
+docker pull tiag0ss/sentrydock-agent:latest
+docker compose up -d
+```
 
 Production should use `https://` (and TLS for gRPC) toward the panel — see `DEPLOYMENT.md` on **SentryDockServer**.
 
----
+## Related
 
-## Related docs
-
-- [protocol/PROTOCOL.md](protocol/PROTOCOL.md) — command and event contract
-- **SentryDockServer** — control plane (separate repo)
+- 🐳 [Docker Hub — agent](https://hub.docker.com/r/tiag0ss/sentrydock-agent)
+- 🐳 [Docker Hub — server](https://hub.docker.com/r/tiag0ss/sentrydock-server)
+- 🎛️ [SentryDockServer](https://github.com/Tiag0ss/sentrydockserver) — control plane
+- 🔌 [protocol/PROTOCOL.md](protocol/PROTOCOL.md) — command and event contract
 
 ## License
 
