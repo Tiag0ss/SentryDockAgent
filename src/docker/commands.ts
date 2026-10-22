@@ -1015,6 +1015,92 @@ export async function handleCommand(
           };
         }
       }
+      case 'docker.compose.discover': {
+        const containers = await docker.listContainers({ all: true });
+        type Disc = {
+          projectName: string;
+          services: string[];
+          configFiles: string[];
+          workingDir: string | null;
+          yamlText: string | null;
+          yamlSource: 'file' | 'compose_config' | null;
+          error?: string;
+        };
+        const byProject = new Map<string, {
+          services: Set<string>;
+          configFiles: Set<string>;
+          workingDir: string | null;
+        }>();
+        for (const c of containers) {
+          const labels = c.Labels || {};
+          const project = String(labels['com.docker.compose.project'] || '').trim();
+          if (!project) continue;
+          const entry = byProject.get(project) || {
+            services: new Set<string>(),
+            configFiles: new Set<string>(),
+            workingDir: null as string | null,
+          };
+          const svc = String(labels['com.docker.compose.service'] || '').trim();
+          if (svc) entry.services.add(svc);
+          const cfg = String(labels['com.docker.compose.project.config_files'] || '').trim();
+          if (cfg) {
+            for (const part of cfg.split(',')) {
+              const pth = part.trim();
+              if (pth) entry.configFiles.add(pth);
+            }
+          }
+          const wd = String(labels['com.docker.compose.project.working_dir'] || '').trim();
+          if (wd && !entry.workingDir) entry.workingDir = wd;
+          byProject.set(project, entry);
+        }
+
+        const projects: Disc[] = [];
+        for (const [projectName, meta] of byProject) {
+          const configFiles = [...meta.configFiles];
+          let yamlText: string | null = null;
+          let yamlSource: Disc['yamlSource'] = null;
+          let error: string | undefined;
+          // Prefer reading the first config file from the host.
+          for (const filePath of configFiles) {
+            try {
+              yamlText = await fs.readFile(filePath, 'utf8');
+              yamlSource = 'file';
+              break;
+            } catch {
+              /* try next */
+            }
+          }
+          if (!yamlText) {
+            try {
+              const args = ['compose', '-p', projectName];
+              for (const f of configFiles) {
+                args.push('-f', f);
+              }
+              args.push('config');
+              const out = await execFileAsync('docker', args, {
+                cwd: meta.workingDir || undefined,
+                timeout: 60_000,
+                maxBuffer: 8 * 1024 * 1024,
+              });
+              yamlText = out.stdout || null;
+              if (yamlText) yamlSource = 'compose_config';
+            } catch (err) {
+              error = err instanceof Error ? err.message : String(err);
+            }
+          }
+          projects.push({
+            projectName,
+            services: [...meta.services].sort(),
+            configFiles,
+            workingDir: meta.workingDir,
+            yamlText,
+            yamlSource,
+            ...(error ? { error } : {}),
+          });
+        }
+        projects.sort((a, b) => a.projectName.localeCompare(b.projectName));
+        return { projects };
+      }
       case 'image.digest': {
         const image = String(p.image);
         const auth = p.auth as RegistryAuth | undefined;

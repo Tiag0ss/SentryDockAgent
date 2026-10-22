@@ -1,0 +1,16 @@
+---
+description: Scope Myelin MCP tools to the SentryDock project via myelin.mcp.json
+alwaysApply: true
+---
+
+# Myelin MCP
+
+Before calling any Myelin MCP tool:
+
+1. Read repo-root `myelin.mcp.json` (`projectIds`, `strict`, `allowWrite`). This repo maps to Myelin project **20** (SentryDock). Current config: `allowWrite: true`.
+2. Resolve `repositoryUrl` with `git remote get-url origin`.
+3. Pass on **every** tool call: `projectIds`, `strict`, `allowWrite`, and `repositoryUrl`.
+4. Prefer `resolve_context` first if scope is unclear. Use MCP for task reads/writes — do not bypass with REST unless MCP cannot do it.
+5. Do not invent status/priority/taskType ids — call `list_project_meta` first.
+6. Task/sprint writes require Profile “Allow MCP task writes” **and** `allowWrite: true` in config.
+7. Never put API tokens in `myelin.mcp.json`.

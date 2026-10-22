@@ -17,6 +17,7 @@ export type CommandType =
   | 'docker.compose'
   | 'docker.compose.apply'
   | 'docker.compose.status'
+  | 'docker.compose.discover'
   | 'image.digest'
   | 'image.runningDigest'
   | 'image.checkUpdate'
